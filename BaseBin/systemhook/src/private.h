@@ -4,6 +4,7 @@
 #include <mach-o/dyld.h>
 
 #define SYS_ptrace 0x1A
+#define SYS_access 0x21
 #define SYS_execve 0x3B
 #define SYS_posix_spawn 0xF4
 #define SYS_csops 0xA9
