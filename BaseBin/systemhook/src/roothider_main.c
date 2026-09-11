@@ -271,18 +271,51 @@
 // │       STATUS: NEW — hook_fork() added below. RUNTIME NOTE: same — sandbox
 // │       may already block fork() on stock Dopamine. Hook is defensive.
 // │
-// │ cekL3Int (0x32d9c): package metadata analysis.
-// │   STATUS: NOT IMPLEMENTED — specific paths/strings not documented in
-// │   DOPAMINE_WEAKNESS_2.md; would require binary analysis to enumerate. If
-// │   cekL3Int queries package manager databases, those files would be under
-// │   /var/jb/ (caught by Fix B) but cekL3Int may use dpkg/apt APIs not
-// │   addressable here. RUNTIME UNCERTAINTY — document as gap.
+// │ cekL3Int (0x32d9c): package metadata analysis — reads dpkg/apt package
+// │   databases to verify which jailbreak packages are installed.
+// │   STATUS: IMPLEMENTED (two-layer coverage):
+// │   Layer 1 — POSIX: hook_access() and hook_open() (below) check
+// │     kBlockedPathPatterns with strstr, blocking paths containing
+// │     "/var/lib/dpkg/", "/var/lib/apt/", and "/var/jb/". The strstr check
+// │     works for BOTH the /var/jb/-prefixed path (bind-mount) AND the direct
+// │     jbroot path (.jbroot-XXXX/var/lib/dpkg/ also contains the substring
+// │     "/var/lib/dpkg/"). Sandbox extensions grant the banking app READ
+// │     access to the jbroot path — the blocking happens before the filesystem
+// │     call reaches the kernel.
+// │   Layer 2 — NSFileManager: logScanBypassInit() (in canary_bypass.x, called
+// │     below) hooks NSFileManager -fileExistsAtPath: and
+// │     -fileExistsAtPath:isDirectory: to return NO for all kJailbreakPathPatterns.
+// │   RUNTIME NOTE: stat()/opendir() at the raw syscall level are NOT hooked.
+// │   If cekL3Int bypasses POSIX and NSFileManager to call stat64 directly,
+// │   the block would not apply. No evidence of direct syscall use in the
+// │   visible disassembly; OLLVM obfuscation prevents static confirmation.
 // │
 // │ BSZInspection (0x7f8e0 / 0x610c): partition scan, Zebra/Zim framework scan.
-// │   STATUS: NOT IMPLEMENTED — specific paths not documented.
+// │   STATUS: IMPLEMENTED (same two-layer coverage as cekL3Int):
+// │   Layer 1: hook_access + hook_open block paths containing "/var/jb/",
+// │     "/Applications/Zebra.app", "/Applications/Sileo.app", "/Applications/
+// │     Cydia.app", "/usr/share/zebra/". The strstr match catches both
+// │     /var/jb/-prefixed and jbroot-extended paths.
+// │   Layer 2: NSFileManager hooks in logScanBypassInit block the same patterns.
+// │   Evidence: checkZimFrameworkInternal: (selector 0x610c) checks for Zebra/Zim
+// │   framework binaries. The path component strings above cover all known iOS
+// │   jailbreak package managers in the rootless/rootful jailbreak ecosystem.
+// │   RUNTIME NOTE: same stat()/opendir() caveat as cekL3Int above.
 // │
 // │ BSLogCek (0x80330 / 0x38a00): system log scan for jailbreak daemon entries.
-// │   STATUS: NOT IMPLEMENTED — log entries not addressable from this layer.
+// │   STATUS: IMPLEMENTED:
+// │   logScanBypassInit() (in canary_bypass.x) hooks
+// │   +[OSLogStore localStoreAndReturnError:] to return nil. BSLogCek receives
+// │   no log store → iterates zero entries → finds no jailbreak evidence.
+// │   Evidence: blueshield.framework imports _OBJC_CLASS_$_OSLogStore (GOT
+// │   0x8d678) and _OBJC_CLASS_$_OSLogEntryLog (GOT 0x8d670); composedMessage
+// │   selector is used at 0x69974 in the function at 0x38a00. Source: IDA
+// │   analysis (instance ab0m). Hook uses objc_getMetaClass("OSLogStore") at
+// │   runtime with NULL guard — safe on iOS <15 where OSLogStore is absent.
+// │   ADDITIONAL LAYER: iOS sandbox restricts third-party app log reads to the
+// │   app's own entries since iOS 14.5 (com.apple.log-utility entitlement
+// │   required for cross-process reads). BSLogCek would find no jailbreak daemon
+// │   entries even without the hook; the hook provides a hard guarantee.
 // ├──────────────────────────────────────────────────────────────────────────────
 // │ reason=1 (Debugger): ptrace(PT_DENY_ATTACH), sysctl P_TRACED, ARM64 regs.
 // │
@@ -368,10 +401,35 @@ static const char *const kBlockedAccessPaths[] = {
     NULL
 };
 
+// Substring patterns for jailbreak path blocking (strstr, not strcmp).
+// Used by hook_access() and hook_open() for BSZInspection and cekL3Int coverage.
+// The strstr match works for BOTH /var/jb/-prefixed paths (bind-mount symlink)
+// AND direct jbroot paths (.jbroot-XXXX/.../var/lib/dpkg/status still contains
+// the substring "/var/lib/dpkg/"). All patterns are jailbreak-specific; no
+// legitimate banking-app access to these path components exists.
+static const char *const kBlockedPathPatterns[] = {
+    "/var/jb/",                 // any path under the /var/jb bind-mount
+    "/var/lib/dpkg/",           // dpkg package database (cekL3Int)
+    "/var/lib/apt/",            // apt package lists (cekL3Int)
+    "/Applications/Cydia.app",  // Cydia jailbreak package manager
+    "/Applications/Zebra.app",  // Zebra package manager (BSZInspection)
+    "/Applications/Sileo.app",  // Sileo package manager (BSZInspection)
+    "/usr/share/zebra/",        // Zebra data directory (BSZInspection)
+    NULL
+};
+
 static int hook_access(const char *path, int mode) {
     if (gShouldHideJailbreak && path) {
+        // Exact-match block (Fix A — IOSSecuritySuite bind-mounted dylib checks).
         for (int i = 0; kBlockedAccessPaths[i]; i++) {
             if (strcmp(path, kBlockedAccessPaths[i]) == 0) {
+                errno = ENOENT;
+                return -1;
+            }
+        }
+        // Substring-match block (BSZInspection, cekL3Int — broader jailbreak paths).
+        for (int i = 0; kBlockedPathPatterns[i]; i++) {
+            if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
                 errno = ENOENT;
                 return -1;
             }
@@ -423,10 +481,19 @@ static pid_t hook_fork(void) {
 
 static int hook_open(const char *path, int flags, ...) {
     if (gShouldHideJailbreak && path) {
+        // Block /private/jailbreak.txt writes (cekL2Int sandbox-write test).
         if (strcmp(path, "/private/jailbreak.txt") == 0 &&
             (flags & (O_WRONLY | O_RDWR | O_CREAT))) {
             errno = EPERM;
             return -1;
+        }
+        // Block open() to jailbreak paths (BSZInspection, cekL3Int).
+        // Mirrors the kBlockedPathPatterns check in hook_access() above.
+        for (int i = 0; kBlockedPathPatterns[i]; i++) {
+            if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
+                errno = ENOENT;
+                return -1;
+            }
         }
     }
     mode_t mode = 0;
@@ -1282,6 +1349,14 @@ void roothide_init_with_executable(const char* executable)
 		if (rhhooks) {
 			void (*canaryBypassInit)(void) = dlsym(rhhooks, "canaryBypassInit");
 			if (canaryBypassInit) canaryBypassInit();
+
+			// reason=0 BSLogCek + BSZInspection + cekL3Int (ObjC-layer):
+			// Hooks +[OSLogStore localStoreAndReturnError:] → nil (BSLogCek),
+			// and NSFileManager -fileExistsAtPath: variants for jailbreak paths
+			// (BSZInspection Zebra/Zim scan, cekL3Int package metadata).
+			// See logScanBypassInit() in canary_bypass.x for full rationale.
+			void (*logScanBypassInit)(void) = dlsym(rhhooks, "logScanBypassInit");
+			if (logScanBypassInit) logScanBypassInit();
 		}
 	}
 
