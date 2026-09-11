@@ -13,6 +13,11 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <fcntl.h>
+#include <syslog.h>
+
+// Diagnostic logger: filter with `syslog -k Sender systemhookd` or
+// `log stream --level info --predicate 'eventMessage contains "[RHHIDE]"'`
+#define RH_LOG(fmt, ...) syslog(LOG_INFO, "[RHHIDE] " fmt, ##__VA_ARGS__)
 
 #include <litehook.h>
 
@@ -409,12 +414,16 @@ static const char *const kBlockedAccessPaths[] = {
 // legitimate banking-app access to these path components exists.
 static const char *const kBlockedPathPatterns[] = {
     "/var/jb/",                 // any path under the /var/jb bind-mount
+    "/.jbroot-",                // direct jbroot path (.jbroot-XXXX/...)
     "/var/lib/dpkg/",           // dpkg package database (cekL3Int)
     "/var/lib/apt/",            // apt package lists (cekL3Int)
+    "/etc/apt/",                // apt configuration (also at /var/jb/etc/apt via bind)
     "/Applications/Cydia.app",  // Cydia jailbreak package manager
     "/Applications/Zebra.app",  // Zebra package manager (BSZInspection)
     "/Applications/Sileo.app",  // Sileo package manager (BSZInspection)
     "/usr/share/zebra/",        // Zebra data directory (BSZInspection)
+    "/Library/MobileSubstrate/",// MobileSubstrate/ElleKit tweak inject path
+    "/usr/lib/TweakInject/",    // TweakInject path (alternate substrate path)
     NULL
 };
 
@@ -423,6 +432,7 @@ static int hook_access(const char *path, int mode) {
         // Exact-match block (Fix A — IOSSecuritySuite bind-mounted dylib checks).
         for (int i = 0; kBlockedAccessPaths[i]; i++) {
             if (strcmp(path, kBlockedAccessPaths[i]) == 0) {
+                RH_LOG("access BLOCKED(exact): %s", path);
                 errno = ENOENT;
                 return -1;
             }
@@ -430,12 +440,18 @@ static int hook_access(const char *path, int mode) {
         // Substring-match block (BSZInspection, cekL3Int — broader jailbreak paths).
         for (int i = 0; kBlockedPathPatterns[i]; i++) {
             if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
+                RH_LOG("access BLOCKED(pattern=%s): %s", kBlockedPathPatterns[i], path);
                 errno = ENOENT;
                 return -1;
             }
         }
     }
-    return (int)syscall(SYS_access, path, mode);
+    int ret = (int)syscall(SYS_access, path, mode);
+    // Log all paths that exist (ret==0) while hiding jailbreak — potential leaks.
+    if (gShouldHideJailbreak && path && ret == 0) {
+        RH_LOG("access PASS(exists): %s", path);
+    }
+    return ret;
 }
 
 // ─── reason=0 cekL2Int: fork() detection bypass ──────────────────────────────
@@ -484,6 +500,7 @@ static int hook_open(const char *path, int flags, ...) {
         // Block /private/jailbreak.txt writes (cekL2Int sandbox-write test).
         if (strcmp(path, "/private/jailbreak.txt") == 0 &&
             (flags & (O_WRONLY | O_RDWR | O_CREAT))) {
+            RH_LOG("open BLOCKED(jailbreak.txt): flags=0x%x", flags);
             errno = EPERM;
             return -1;
         }
@@ -491,6 +508,7 @@ static int hook_open(const char *path, int flags, ...) {
         // Mirrors the kBlockedPathPatterns check in hook_access() above.
         for (int i = 0; kBlockedPathPatterns[i]; i++) {
             if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
+                RH_LOG("open BLOCKED(pattern=%s): %s flags=0x%x", kBlockedPathPatterns[i], path, flags);
                 errno = ENOENT;
                 return -1;
             }
@@ -503,7 +521,12 @@ static int hook_open(const char *path, int flags, ...) {
         mode = (mode_t)va_arg(ap, int);
         va_end(ap);
     }
-    return (int)syscall(SYS_open, path, flags, mode);
+    int ret = (int)syscall(SYS_open, path, flags, mode);
+    // Log successful opens (fd>=0) when hiding jailbreak — helps trace what BS reads.
+    if (gShouldHideJailbreak && path && ret >= 0) {
+        RH_LOG("open PASS(fd=%d): %s flags=0x%x", ret, path, flags);
+    }
+    return ret;
 }
 
 // ─── Fix B: dyld image-list hooks to hide jailbreak dylibs from MC1 ──────────
@@ -1299,65 +1322,50 @@ void roothide_init_with_executable(const char* executable)
 	// jailbreak detection bypass.
 	if (isRemovableBundlePath(executable) && jbclient_blacklist_check_pid(getpid())) {
 		gShouldHideJailbreak = true;  // activates Fix B (dyld image-list filter)
+		RH_LOG("ACTIVATED pid=%d exe=%s", getpid(), executable);
 
 		// Fix A: hook access() for IOSSecuritySuite file-existence checks.
-		// 'access' (not '__access') is the correct target: IOSSecuritySuite calls
-		// access() from Swift/ObjC code and links against the 'access' symbol in
-		// libsystem_kernel.dylib. On Darwin, 'access' and '__access' are the same
-		// syscall stub; litehook's instruction replacement at that address intercepts
-		// all callers via the 'access' symbol. (__sysctl uses the kernel-entry
-		// '__sysctl' name in roothider_common.c to catch internal framework callers
-		// that bypass libc — a different concern; not applicable here.)
 		litehook_hook_function(access, hook_access);
+		RH_LOG("hook_access installed");
 
-		// reason=0 cekL2Int: block fork() to clear the fork-success jailbreak bit
-		// in BSHasApp bitmask=28. See hook_fork() comment above for details.
+		// reason=0 cekL2Int: block fork() to clear the fork-success jailbreak bit.
 		litehook_hook_function(fork, hook_fork);
+		RH_LOG("hook_fork installed");
 
-		// reason=0 cekL2Int: block writes to /private/jailbreak.txt to clear the
-		// sandbox-write bit in BSHasApp bitmask=28. See hook_open() above.
+		// reason=0 cekL2Int: block writes to /private/jailbreak.txt.
 		litehook_hook_function(open, hook_open);
+		RH_LOG("hook_open installed");
 
-		// reason=9: install developer_mode_status sysctl intercepts for app processes.
-		// __sysctl_hook / __sysctlbyname_hook in roothider_common.c intercept
-		// security.mac.amfi.developer_mode_status queries, but those hooks are
-		// installed only for !isRemovableBundlePath (system daemons). Banking app
-		// processes (isRemovableBundlePath == true) did not get them.
-		// BsDeviceInfo.getBuildId (0x2805c) queries this key to detect Developer
-		// Mode (iOS 16+, required to be ON by most Dopamine jailbreaks) → reason=9.
-		// litehook is safe to call here: isRemovableBundlePath is true for this
-		// process, so the daemon path at lines ~1085 did NOT run for this process;
-		// no double-hook can occur (the two branches are mutually exclusive).
+		// reason=9: developer_mode_status sysctl intercepts for app processes.
 		if (__builtin_available(iOS 16.0, *)) {
 			litehook_hook_function(__sysctl, __sysctl_hook);
 			litehook_hook_function(__sysctlbyname, __sysctlbyname_hook);
+			RH_LOG("sysctl hooks installed (iOS16+)");
 		}
 
-		// Fix C — Phase 2: restore BSDPMRHide IMPs. roothideinit.dylib source is
-		// unavailable; save/restore is safe regardless — see the "Fix C" block
-		// comment above for details on both the defensive logic and the safety of
-		// calling method_setImplementation from a constructor at this point.
-		// If save_canary_imps found no class or no methods, this is a no-op.
+		// Fix C — Phase 2: restore BSDPMRHide IMPs.
 		restore_canary_imps();
+		RH_LOG("restore_canary_imps done");
 
-		// Fix C — Phase 3: prevent future ElleKit hooks (from TweakLoader tweaks)
-		// from modifying BSDPMRHide methods. TweakLoader runs at main.c:431-441,
-		// AFTER this function call at main.c:427 — confirmed from source.
-		// RTLD_NOW guarantees CydiaSubstrate is loaded before dlopen returns; if it
-		// fails (missing substrate), dlopen returns NULL and we skip gracefully.
+		// Fix C — Phase 3: prevent future ElleKit hooks on BSDPMRHide.
 		void *rhhooks = dlopen(JBROOT_PATH("/basebin/roothidehooks.dylib"), RTLD_NOW);
+		RH_LOG("roothidehooks dlopen=%p dlerror=%s", rhhooks, rhhooks ? "ok" : dlerror());
 		if (rhhooks) {
 			void (*canaryBypassInit)(void) = dlsym(rhhooks, "canaryBypassInit");
+			RH_LOG("canaryBypassInit=%p", canaryBypassInit);
 			if (canaryBypassInit) canaryBypassInit();
 
 			// reason=0 BSLogCek + BSZInspection + cekL3Int (ObjC-layer):
 			// Hooks +[OSLogStore localStoreAndReturnError:] → nil (BSLogCek),
-			// and NSFileManager -fileExistsAtPath: variants for jailbreak paths
-			// (BSZInspection Zebra/Zim scan, cekL3Int package metadata).
-			// See logScanBypassInit() in canary_bypass.x for full rationale.
+			// and NSFileManager -fileExistsAtPath: variants for jailbreak paths.
 			void (*logScanBypassInit)(void) = dlsym(rhhooks, "logScanBypassInit");
+			RH_LOG("logScanBypassInit=%p", logScanBypassInit);
 			if (logScanBypassInit) logScanBypassInit();
 		}
+		RH_LOG("bypass init complete");
+	} else {
+		RH_LOG("NOT activated pid=%d isRemovable=%d exe=%s",
+		       getpid(), isRemovableBundlePath(executable), executable);
 	}
 
 	dlopen(JBROOT_PATH("/usr/lib/roothidepatch.dylib"), RTLD_NOW); //require jit

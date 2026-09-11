@@ -1,6 +1,9 @@
 #import <Foundation/Foundation.h>
 #import <substrate.h>
 #import <objc/runtime.h>
+#import <syslog.h>
+
+#define RH_LOG(fmt, ...) syslog(LOG_INFO, "[RHHIDE] " fmt, ##__VA_ARGS__)
 
 // BSDPMRHide (0x80600 in blueshield.framework) is a canary/honeypot ObjC class
 // designed by Singalarity BlueShield to detect ObjC hook frameworks
@@ -120,6 +123,7 @@ static bool jailbreakBypassShouldBlockPath(NSString *path) {
 static id (*orig_localStoreAndReturnError)(Class cls, SEL sel, NSError **error) = NULL;
 
 static id replaced_localStoreAndReturnError(Class cls, SEL sel, NSError **error) {
+    RH_LOG("BSLogCek: OSLogStore.localStore blocked");
     if (error) *error = nil;
     return nil;
 }
@@ -127,29 +131,41 @@ static id replaced_localStoreAndReturnError(Class cls, SEL sel, NSError **error)
 static BOOL (*orig_fileExistsAtPath)(id self, SEL sel, NSString *path) = NULL;
 
 static BOOL replaced_fileExistsAtPath(id self, SEL sel, NSString *path) {
-    if (jailbreakBypassShouldBlockPath(path)) return NO;
-    return orig_fileExistsAtPath(self, sel, path);
+    if (jailbreakBypassShouldBlockPath(path)) {
+        RH_LOG("NSFileMgr.fileExistsAtPath BLOCKED: %s", [path UTF8String] ?: "");
+        return NO;
+    }
+    BOOL ret = orig_fileExistsAtPath(self, sel, path);
+    if (ret) RH_LOG("NSFileMgr.fileExistsAtPath PASS(YES): %s", [path UTF8String] ?: "");
+    return ret;
 }
 
 static BOOL (*orig_fileExistsAtPathIsDirectory)(id self, SEL sel, NSString *path, BOOL *isDirectory) = NULL;
 
 static BOOL replaced_fileExistsAtPathIsDirectory(id self, SEL sel, NSString *path, BOOL *isDirectory) {
     if (jailbreakBypassShouldBlockPath(path)) {
+        RH_LOG("NSFileMgr.fileExistsAtPath:isDirectory: BLOCKED: %s", [path UTF8String] ?: "");
         if (isDirectory) *isDirectory = NO;
         return NO;
     }
-    return orig_fileExistsAtPathIsDirectory(self, sel, path, isDirectory);
+    BOOL ret = orig_fileExistsAtPathIsDirectory(self, sel, path, isDirectory);
+    if (ret) RH_LOG("NSFileMgr.fileExistsAtPath:isDir: PASS(YES): %s", [path UTF8String] ?: "");
+    return ret;
 }
 
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
+    RH_LOG("logScanBypassInit called");
+
     // Hook +[OSLogStore localStoreAndReturnError:] → nil: disables BSLogCek.
     Class osLogStoreMeta = objc_getMetaClass("OSLogStore");
+    RH_LOG("OSLogStore metaclass=%p", osLogStoreMeta);
     if (osLogStoreMeta) {
         MSHookMessageEx(osLogStoreMeta,
                         @selector(localStoreAndReturnError:),
                         (IMP)replaced_localStoreAndReturnError,
                         (IMP *)&orig_localStoreAndReturnError);
+        RH_LOG("OSLogStore.localStoreAndReturnError hooked");
     }
 
     // Hook NSFileManager file-existence checks for jailbreak path blocking.
@@ -158,8 +174,11 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     @selector(fileExistsAtPath:),
                     (IMP)replaced_fileExistsAtPath,
                     (IMP *)&orig_fileExistsAtPath);
+    RH_LOG("NSFileManager.fileExistsAtPath: hooked");
     MSHookMessageEx([NSFileManager class],
                     @selector(fileExistsAtPath:isDirectory:),
                     (IMP)replaced_fileExistsAtPathIsDirectory,
                     (IMP *)&orig_fileExistsAtPathIsDirectory);
+    RH_LOG("NSFileManager.fileExistsAtPath:isDirectory: hooked");
+    RH_LOG("logScanBypassInit complete");
 }
