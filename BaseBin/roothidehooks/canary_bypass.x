@@ -56,3 +56,110 @@ __attribute__((visibility("default"))) void canaryBypassInit(void)
 	               (void *)replaced_class_getClassMethod,
 	               (void **)&orig_class_getClassMethod);
 }
+
+// ─── BSLogCek + BSZInspection + cekL3Int ObjC-layer bypass ──────────────────
+//
+// BSLogCek (0x38a00 in blueshield.framework, DOPAMINE_WEAKNESS_2.md reason=0):
+//   Uses +[OSLogStore localStoreAndReturnError:] to open the system log store,
+//   then iterates log entries checking composedMessage for jailbreak daemon strings.
+//   Evidence: blueshield.framework imports _OBJC_CLASS_$_OSLogStore (GOT 0x8d678)
+//   and _OBJC_CLASS_$_OSLogEntryLog (GOT 0x8d670); composedMessage selector at
+//   0x69974 is used in the BSLogCek.apply function (IDA instance ab0m, base 0x0).
+//   Hook: return nil from localStoreAndReturnError: → BSLogCek receives no log
+//   store → enumerates zero entries → finds no jailbreak evidence.
+//
+//   Additional context: iOS sandbox policy restricts third-party apps to reading
+//   only their own log entries since iOS 14.5 (requires com.apple.log-utility
+//   private entitlement for cross-process log reads). BSLogCek's log scan would
+//   likely be empty even without this hook. The hook provides a hard guarantee.
+//   OSLogStore availability guard: objc_getMetaClass("OSLogStore") returns NULL
+//   on iOS <15 where OSLogStore is absent → MSHookMessageEx skipped safely.
+//
+// BSZInspection (0x5848 / 0x610c, DOPAMINE_WEAKNESS_2.md reason=0):
+//   Scans for Zebra/Zim jailbreak framework files and root partition structure.
+//   If it uses NSFileManager.fileExistsAtPath:, these hooks intercept it and
+//   return NO for all jailbreak-indicating paths.
+//
+// cekL3Int (0x32d9c, DOPAMINE_WEAKNESS_2.md reason=0):
+//   Reads package manager metadata (dpkg/apt). If it uses NSFileManager for
+//   directory/file existence checks (e.g. checking for dpkg status file), these
+//   hooks intercept it.
+//
+// Path pattern rationale: strstr-based matching works for both /var/jb/-prefixed
+// paths (bind-mount) and direct jbroot paths (.jbroot-XXXX/var/lib/dpkg/status
+// still contains the substring /var/lib/dpkg/). All patterns are jailbreak-
+// specific and have no legitimate use in a banking app.
+//
+// RUNTIME NOTE on stat()/opendir(): NSFileManager internally calls stat64() for
+// fileExistsAtPath: on modern iOS. The hooks here intercept the ObjC API layer.
+// If BSZInspection or cekL3Int bypass NSFileManager and call stat/opendir
+// directly (via POSIX), the hook_access/hook_open extensions in roothider_main.c
+// provide POSIX-layer coverage. stat() at the raw syscall level is not hooked.
+
+static const char *const kJailbreakPathPatterns[] = {
+    "/var/jb/",                    // any /var/jb/ bind-mount path
+    "/var/lib/dpkg/",              // dpkg package database (cekL3Int)
+    "/var/lib/apt/",               // apt package lists (cekL3Int)
+    "/Applications/Cydia.app",     // Cydia package manager
+    "/Applications/Zebra.app",     // Zebra package manager
+    "/Applications/Sileo.app",     // Sileo package manager
+    "/usr/share/zebra/",           // Zebra data directory
+    NULL
+};
+
+static bool jailbreakBypassShouldBlockPath(NSString *path) {
+    if (!path) return false;
+    const char *cpath = [path UTF8String];
+    if (!cpath) return false;
+    for (int i = 0; kJailbreakPathPatterns[i]; i++) {
+        if (strstr(cpath, kJailbreakPathPatterns[i])) return true;
+    }
+    return false;
+}
+
+static id (*orig_localStoreAndReturnError)(Class cls, SEL sel, NSError **error) = NULL;
+
+static id replaced_localStoreAndReturnError(Class cls, SEL sel, NSError **error) {
+    if (error) *error = nil;
+    return nil;
+}
+
+static BOOL (*orig_fileExistsAtPath)(id self, SEL sel, NSString *path) = NULL;
+
+static BOOL replaced_fileExistsAtPath(id self, SEL sel, NSString *path) {
+    if (jailbreakBypassShouldBlockPath(path)) return NO;
+    return orig_fileExistsAtPath(self, sel, path);
+}
+
+static BOOL (*orig_fileExistsAtPathIsDirectory)(id self, SEL sel, NSString *path, BOOL *isDirectory) = NULL;
+
+static BOOL replaced_fileExistsAtPathIsDirectory(id self, SEL sel, NSString *path, BOOL *isDirectory) {
+    if (jailbreakBypassShouldBlockPath(path)) {
+        if (isDirectory) *isDirectory = NO;
+        return NO;
+    }
+    return orig_fileExistsAtPathIsDirectory(self, sel, path, isDirectory);
+}
+
+__attribute__((visibility("default"))) void logScanBypassInit(void)
+{
+    // Hook +[OSLogStore localStoreAndReturnError:] → nil: disables BSLogCek.
+    Class osLogStoreMeta = objc_getMetaClass("OSLogStore");
+    if (osLogStoreMeta) {
+        MSHookMessageEx(osLogStoreMeta,
+                        @selector(localStoreAndReturnError:),
+                        (IMP)replaced_localStoreAndReturnError,
+                        (IMP *)&orig_localStoreAndReturnError);
+    }
+
+    // Hook NSFileManager file-existence checks for jailbreak path blocking.
+    // Covers BSZInspection Zebra/Zim scan and cekL3Int package metadata reads.
+    MSHookMessageEx([NSFileManager class],
+                    @selector(fileExistsAtPath:),
+                    (IMP)replaced_fileExistsAtPath,
+                    (IMP *)&orig_fileExistsAtPath);
+    MSHookMessageEx([NSFileManager class],
+                    @selector(fileExistsAtPath:isDirectory:),
+                    (IMP)replaced_fileExistsAtPathIsDirectory,
+                    (IMP *)&orig_fileExistsAtPathIsDirectory);
+}
