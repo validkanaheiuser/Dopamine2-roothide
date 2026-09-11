@@ -15,9 +15,9 @@
 #include <fcntl.h>
 #include <syslog.h>
 
-// Diagnostic logger: filter with `syslog -k Sender systemhookd` or
-// `log stream --level info --predicate 'eventMessage contains "[RHHIDE]"'`
-#define RH_LOG(fmt, ...) syslog(LOG_INFO, "[RHHIDE] " fmt, ##__VA_ARGS__)
+// Diagnostic logger — use LOG_WARNING for AUL visibility on iOS 14+.
+// On device: log stream --level debug --predicate 'eventMessage contains "[RHHIDE]"'
+#define RH_LOG(fmt, ...) syslog(LOG_WARNING, "[RHHIDE] " fmt, ##__VA_ARGS__)
 
 #include <litehook.h>
 
