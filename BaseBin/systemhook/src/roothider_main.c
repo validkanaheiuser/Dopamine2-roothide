@@ -1364,9 +1364,6 @@ void roothide_init_with_executable(const char* executable)
 			if (logScanBypassInit) logScanBypassInit();
 		}
 		RH_LOG("bypass init complete");
-	} else {
-		RH_LOG("NOT activated pid=%d isRemovable=%d exe=%s",
-		       getpid(), isRemovableBundlePath(executable), executable);
 	}
 
 	dlopen(JBROOT_PATH("/usr/lib/roothidepatch.dylib"), RTLD_NOW); //require jit
