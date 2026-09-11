@@ -3,7 +3,7 @@
 #import <objc/runtime.h>
 #import <syslog.h>
 
-#define RH_LOG(fmt, ...) syslog(LOG_INFO, "[RHHIDE] " fmt, ##__VA_ARGS__)
+#define RH_LOG(fmt, ...) syslog(LOG_WARNING, "[RHHIDE] " fmt, ##__VA_ARGS__)
 
 // BSDPMRHide (0x80600 in blueshield.framework) is a canary/honeypot ObjC class
 // designed by Singalarity BlueShield to detect ObjC hook frameworks
