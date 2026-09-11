@@ -3,6 +3,8 @@
 
 #include <mach-o/dyld.h>
 
+#define SYS_fork   0x2
+#define SYS_open   0x5
 #define SYS_ptrace 0x1A
 #define SYS_access 0x21
 #define SYS_execve 0x3B

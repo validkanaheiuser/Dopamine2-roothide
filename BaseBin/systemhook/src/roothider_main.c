@@ -11,6 +11,8 @@
 #include <mach/task.h>
 #include <objc/runtime.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <fcntl.h>
 
 #include <litehook.h>
 
@@ -241,12 +243,115 @@
 // Conclusion: zero race risk at this call site.
 // ═══════════════════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// DOPAMINE_WEAKNESS_2.md — Coverage Audit (all 10 reason codes, 0–9)
+//
+// Source: IDA Pro reverse engineering of blueshield.framework + NBRDynKey.framework
+// in com.lpb.lienviet24h_4.3.0 (nBowRee / Singalarity WaaS BlueShield SDK).
+//
+// ┌──────────────────────────────────────────────────────────────────────────────
+// │ reason=0 (Jailbreak): BSHasApp (0x801f0), BSZInspection (0x7f8e0), BSLogCek
+// │
+// │ cekL1Int (0x31e6c): checks cydia://, sileo://, zbra://, filza:// URL schemes.
+// │   STATUS: COVERED — lsd.x (BaseBin/roothidehooks/lsd.x lines 30-112) hooks
+// │   _LSCanOpenURLManager:canOpenURL: and calls isJailbreakURLScheme() for apps
+// │   on the RootHide blacklist. No action needed here.
+// │
+// │ cekL2Int (0x324d4): bitmask=28 = three sub-tests:
+// │   (a) file access — access() succeeds for jailbreak-indicator files.
+// │       STATUS: PARTIALLY COVERED by hook_access (Fix A) for 3 known paths.
+// │       Other paths (e.g. /etc/apt, /Applications/Cydia.app) may exist in
+// │       the cekL2Int check but are not documented in DOPAMINE_WEAKNESS_2.md.
+// │   (b) sandbox write — open("/private/jailbreak.txt", O_WRONLY|O_CREAT, ...)
+// │       succeeds, proving sandbox escape.
+// │       STATUS: NEW — hook_open() added below. RUNTIME NOTE: on stock Dopamine
+// │       the app sandbox is intact; this write likely already fails. Hook is
+// │       defensive.
+// │   (c) fork() succeeds, proving the process can spawn children (sandbox bypass).
+// │       STATUS: NEW — hook_fork() added below. RUNTIME NOTE: same — sandbox
+// │       may already block fork() on stock Dopamine. Hook is defensive.
+// │
+// │ cekL3Int (0x32d9c): package metadata analysis.
+// │   STATUS: NOT IMPLEMENTED — specific paths/strings not documented in
+// │   DOPAMINE_WEAKNESS_2.md; would require binary analysis to enumerate. If
+// │   cekL3Int queries package manager databases, those files would be under
+// │   /var/jb/ (caught by Fix B) but cekL3Int may use dpkg/apt APIs not
+// │   addressable here. RUNTIME UNCERTAINTY — document as gap.
+// │
+// │ BSZInspection (0x7f8e0 / 0x610c): partition scan, Zebra/Zim framework scan.
+// │   STATUS: NOT IMPLEMENTED — specific paths not documented.
+// │
+// │ BSLogCek (0x80330 / 0x38a00): system log scan for jailbreak daemon entries.
+// │   STATUS: NOT IMPLEMENTED — log entries not addressable from this layer.
+// ├──────────────────────────────────────────────────────────────────────────────
+// │ reason=1 (Debugger): ptrace(PT_DENY_ATTACH), sysctl P_TRACED, ARM64 regs.
+// │
+// │   STATUS: NO ACTION NEEDED for Dopamine bypass use case.
+// │   P_TRACED is 0 on a non-debugged device — reason=1 does not fire when the
+// │   banking app is run normally on a jailbroken device without a debugger
+// │   attached. PT_DENY_ATTACH is SDK self-protection (prevents attachment),
+// │   not a jailbreak check. ARM64 watchpoint registers are 0 without a debugger.
+// │   All three checks pass (no debugger detected) on Dopamine in normal use.
+// ├──────────────────────────────────────────────────────────────────────────────
+// │ reason=2 (Tampering): SHA-1 cert comparison (MAtt/InternalUtil).
+// │
+// │   STATUS: NO ACTION NEEDED for Dopamine bypass use case.
+// │   reason=2 fires only when the app has been re-signed with a non-LPBank
+// │   certificate (TrollStore, AltStore, Sideloadly). An App Store install from
+// │   the LPBank production certificate passes the SHA-1 check. Dopamine
+// │   jailbreak does not modify the app binary or its embedded certificate.
+// ├──────────────────────────────────────────────────────────────────────────────
+// │ reason=3 (Screenshot), reason=6 (Screen Recording): UIKit notifications.
+// │
+// │   STATUS: NOT RELEVANT — these trigger on user actions (screenshot/AirPlay),
+// │   not on jailbreak presence. Not addressable via systemhook.
+// ├──────────────────────────────────────────────────────────────────────────────
+// │ reason=4 (Injected Library): MWkpr.doWkpr (0x6ae0), dyld scan.
+// │
+// │   STATUS: COVERED by Fix B (dyld image-list hooks) + is_jailbreak_image()
+// │   extension below. MWkpr calls _dyld_image_count/_dyld_get_image_name to
+// │   enumerate loaded dylibs and checks for /Library/MobileSubstrate/ and
+// │   /usr/lib/TweakInject/ prefixes. Fix B filters all images for which
+// │   is_jailbreak_image() returns true. is_jailbreak_image() is extended here
+// │   to include both explicit paths from DOPAMINE_WEAKNESS_2.md.
+// ├──────────────────────────────────────────────────────────────────────────────
+// │ reason=5 (Hooking): MC1/BSDPMRHide. ALREADY FIXED — see DOPAMINE_WEAKNESS.md
+// │   audit block above.
+// ├──────────────────────────────────────────────────────────────────────────────
+// │ reason=7 (macOS), reason=8 (Emulator): BsDeviceInfo API checks.
+// │
+// │   STATUS: NOT RELEVANT — these detect hardware environment (Mac/simulator),
+// │   not jailbreak. A real iPhone running Dopamine returns correct values for
+// │   isMacCatalystApp (false), hw.machine (e.g. iPhone15,3). No action needed.
+// ├──────────────────────────────────────────────────────────────────────────────
+// │ reason=9 (Developer Mode): BsDeviceInfo.getBuildId (0x2805c),
+// │   security.mac.amfi.developer_mode_status sysctl.
+// │
+// │   STATUS: NEW — __sysctl_hook and __sysctlbyname_hook in roothider_common.c
+// │   already intercept this sysctl but are installed ONLY for system processes
+// │   (!isRemovableBundlePath). For banking app processes (removable bundle path),
+// │   these hooks were not installed. Extended below: the blacklist check block
+// │   now also installs them for app processes when gShouldHideJailbreak is true.
+// │   The hooks return security.mac.amfi.launch_env_logging value or 1 (non-zero
+// │   = developer mode appears enabled to the SDK, but with the hook active the
+// │   SDK receives a value that does not indicate developer mode — see
+// │   __sysctlbyname_hook in roothider_common.c for exact logic).
+// │
+// │   RUNTIME NOTE: reason=9 fires if Developer Mode is enabled in iOS Settings.
+// │   Developer Mode can be ON even without a debugger (it persists across
+// │   sessions). Dopamine jailbreak often requires Developer Mode to be enabled.
+// │   This is therefore a relevant gap: the hook ensures the SDK does not see
+// │   the raw developer_mode_status=1 value.
+// └──────────────────────────────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════════
+
 const char* HOOK_DYLIB_PATH = NULL;
 
 bool dyld_patch_fallback_enabled = false;
 
 // Set to true for apps that have opted into RootHide's jailbreak-hide list.
-// Controls Fix A (access hook) and Fix B (dyld image-list filtering).
+// Controls Fix A (access/open/fork hooks), Fix B (dyld image-list filtering),
+// reason=9 sysctl hooks, and reason=4 is_jailbreak_image path extensions.
 static bool gShouldHideJailbreak = false;
 
 // ─── Fix A: access() hook for IOSSecuritySuite file-existence checks ─────────
@@ -273,6 +378,65 @@ static int hook_access(const char *path, int mode) {
         }
     }
     return (int)syscall(SYS_access, path, mode);
+}
+
+// ─── reason=0 cekL2Int: fork() detection bypass ──────────────────────────────
+//
+// BSHasApp.cekL2Int (0x324d4 in blueshield.framework, DOPAMINE_WEAKNESS_2.md)
+// tests fork() as part of bitmask=28: a successful fork() from within the app
+// signals that the process sandbox has been weakened (jailbreak indicator).
+//
+// We hook fork() to return -1 (EPERM) when gShouldHideJailbreak is true.
+// litehook has no trampoline, so the pass-through path uses syscall(SYS_fork)
+// directly. The pass-through branch is unreachable when the hook is installed
+// (installed only when gShouldHideJailbreak is already true), but is kept for
+// defensive correctness.
+//
+// RUNTIME NOTE: on stock Dopamine (intact app sandbox), fork() already fails for
+// sandboxed apps. This hook is defensive; it is harmless if fork() already fails.
+
+static pid_t hook_fork(void) {
+    if (gShouldHideJailbreak) {
+        errno = EPERM;
+        return -1;
+    }
+    return (pid_t)syscall(SYS_fork);
+}
+
+// ─── reason=0 cekL2Int: sandbox-write detection bypass ───────────────────────
+//
+// BSHasApp.cekL2Int (0x324d4) tests whether the app can write to
+// /private/jailbreak.txt. On a stock device the sandbox denies this write.
+// On jailbroken devices where the sandbox is weakened, the write succeeds and
+// contributes a bit to bitmask=28, triggering reason=0.
+//
+// We hook open() to return EPERM for /private/jailbreak.txt in any write mode,
+// mimicking the sandbox denial. All other paths pass through to the kernel via
+// syscall(SYS_open) (litehook has no trampoline; caller-transparent).
+//
+// Varargs: open() is int open(const char*, int flags, ...) — the optional third
+// arg is mode_t, passed only when O_CREAT is in flags. On arm64, mode_t is
+// promoted to int in the variadic call; va_arg(ap, int) extracts it correctly.
+//
+// RUNTIME NOTE: on stock Dopamine (intact sandbox), this write already fails.
+// This hook is defensive; it is harmless if the write already fails naturally.
+
+static int hook_open(const char *path, int flags, ...) {
+    if (gShouldHideJailbreak && path) {
+        if (strcmp(path, "/private/jailbreak.txt") == 0 &&
+            (flags & (O_WRONLY | O_RDWR | O_CREAT))) {
+            errno = EPERM;
+            return -1;
+        }
+    }
+    mode_t mode = 0;
+    if (flags & O_CREAT) {
+        va_list ap;
+        va_start(ap, flags);
+        mode = (mode_t)va_arg(ap, int);
+        va_end(ap);
+    }
+    return (int)syscall(SYS_open, path, flags, mode);
 }
 
 // ─── Fix B: dyld image-list hooks to hide jailbreak dylibs from MC1 ──────────
@@ -309,6 +473,13 @@ static bool is_jailbreak_image(const char *path) {
     // as the bind-mounted "/usr/lib/systemhook-<UUID>.dylib" if the environment
     // variable used the bind-mount path. This check covers that second case.
     if (strstr(path, "/usr/lib/systemhook-") != NULL) return true;
+    // MWkpr (0x6ae0 in blueshield.framework, DOPAMINE_WEAKNESS_2.md reason=4)
+    // explicitly scans for dylibs under these two paths. TweakLoader may dlopen
+    // tweaks via the bind-mounted path (without the /var/jb/ prefix), so they
+    // appear in dyld_all_image_infos as /usr/lib/TweakInject/<foo>.dylib or
+    // /Library/MobileSubstrate/DynamicLibraries/<foo>.dylib.
+    if (strstr(path, "/usr/lib/TweakInject/") != NULL) return true;
+    if (strstr(path, "/Library/MobileSubstrate/") != NULL) return true;
     return false;
 }
 
@@ -482,11 +653,15 @@ static void init_image_list_hooks(void) {
 //   additional code is needed here.
 //
 // NOTE on __sysctl/__sysctlbyname (roothider_common.c):
-//   These hooks intercept security.mac.amfi.developer_mode_status queries for
-//   non-app system processes only (!isRemovableBundlePath). They are NOT related
-//   to any of the three detection layers in DOPAMINE_WEAKNESS.md.
-//   DOPAMINE_WEAKNESS.md mentions sysctlbyname("hw.machine") only as metadata
-//   collection (URL parameter), not as a detection mechanism. No changes needed.
+//   These hooks intercept security.mac.amfi.developer_mode_status queries.
+//   Originally installed only for !isRemovableBundlePath (system daemons), they
+//   are now ALSO installed for blacklisted app processes (gShouldHideJailbreak)
+//   to address DOPAMINE_WEAKNESS_2.md reason=9 (Developer Mode detection by
+//   BsDeviceInfo.getBuildId at 0x2805c). The two installation paths are mutually
+//   exclusive (isRemovableBundlePath cannot be both true and false), so litehook
+//   cannot double-hook __sysctl/__sysctlbyname for any single process.
+//   DOPAMINE_WEAKNESS.md's sysctlbyname("hw.machine") is metadata only (not a
+//   detection mechanism) — no action needed for that use.
 // ─────────────────────────────────────────────────────────────────────────────
 
 typedef struct { Method method; IMP origIMP; } SavedIMP;
@@ -1068,6 +1243,29 @@ void roothide_init_with_executable(const char* executable)
 		// '__sysctl' name in roothider_common.c to catch internal framework callers
 		// that bypass libc — a different concern; not applicable here.)
 		litehook_hook_function(access, hook_access);
+
+		// reason=0 cekL2Int: block fork() to clear the fork-success jailbreak bit
+		// in BSHasApp bitmask=28. See hook_fork() comment above for details.
+		litehook_hook_function(fork, hook_fork);
+
+		// reason=0 cekL2Int: block writes to /private/jailbreak.txt to clear the
+		// sandbox-write bit in BSHasApp bitmask=28. See hook_open() above.
+		litehook_hook_function(open, hook_open);
+
+		// reason=9: install developer_mode_status sysctl intercepts for app processes.
+		// __sysctl_hook / __sysctlbyname_hook in roothider_common.c intercept
+		// security.mac.amfi.developer_mode_status queries, but those hooks are
+		// installed only for !isRemovableBundlePath (system daemons). Banking app
+		// processes (isRemovableBundlePath == true) did not get them.
+		// BsDeviceInfo.getBuildId (0x2805c) queries this key to detect Developer
+		// Mode (iOS 16+, required to be ON by most Dopamine jailbreaks) → reason=9.
+		// litehook is safe to call here: isRemovableBundlePath is true for this
+		// process, so the daemon path at lines ~1085 did NOT run for this process;
+		// no double-hook can occur (the two branches are mutually exclusive).
+		if (__builtin_available(iOS 16.0, *)) {
+			litehook_hook_function(__sysctl, __sysctl_hook);
+			litehook_hook_function(__sysctlbyname, __sysctlbyname_hook);
+		}
 
 		// Fix C — Phase 2: restore BSDPMRHide IMPs. roothideinit.dylib source is
 		// unavailable; save/restore is safe regardless — see the "Fix C" block
