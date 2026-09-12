@@ -13,11 +13,19 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <fcntl.h>
-#include <syslog.h>
+#include <os/log.h>
 
-// Diagnostic logger — use LOG_WARNING for AUL visibility on iOS 14+.
-// On device: log stream --level debug --predicate 'eventMessage contains "[RHHIDE]"'
-#define RH_LOG(fmt, ...) syslog(LOG_WARNING, "[RHHIDE] " fmt, ##__VA_ARGS__)
+// Diagnostic logger for Apple Unified Logging (idevicesyslog / log stream)
+// Uses OS_LOG_TYPE_DEFAULT (<Notice>) with %{public}s to prevent <private> redaction
+static inline void rh_log(const char *fmt, ...) {
+    char buf[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "[RHHIDE] %{public}s", buf);
+}
+#define RH_LOG(fmt, ...) rh_log(fmt, ##__VA_ARGS__)
 
 #include <litehook.h>
 
