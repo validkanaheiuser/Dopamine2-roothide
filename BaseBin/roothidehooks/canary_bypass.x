@@ -72,6 +72,60 @@ __attribute__((visibility("default"))) void canaryBypassInit(void)
 	               (void **)&orig_class_getClassMethod);
 }
 
+// ─── RuntimeHookChecker bypass: method_getImplementation intercept ────────────
+//
+// _TtC9MBRaspSdk18RuntimeHookChecker (DOPAMINE_WEAKNESS_3.md §B.1) calls
+// class_getInstanceMethod + method_getImplementation to read each ObjC method's
+// IMP, then checks whether that IMP falls within the __TEXT segment of a
+// recognised system framework. Any IMP pointing outside those ranges (e.g. into
+// roothidehooks.dylib) triggers reason=5.
+//
+// We hook via MSHookMessageEx:
+//   +[OSLogStore localStoreAndReturnError:]  → replaced_localStoreAndReturnError
+//   -[NSFileManager fileExistsAtPath:]       → replaced_fileExistsAtPath
+//   -[NSFileManager fileExistsAtPath:isDirectory:] → replaced_fileExistsAtPathIsDirectory
+//   -[NSFileManager contentsOfDirectoryAtPath:error:] → replaced_contentsOfDirectoryAtPath
+//
+// After each MSHookMessageEx the method table entry has our IMP. When
+// RuntimeHookChecker calls method_getImplementation(m) for those methods it
+// would see our IMP (in roothidehooks.dylib __TEXT) and fire.
+//
+// Fix: hook method_getImplementation via MSHookFunction to return stored
+// original IMPs for methods we have hooked, making RuntimeHookChecker see the
+// original Foundation IMP (inside __TEXT of Foundation/libsystem) instead.
+//
+// Implementation notes:
+//   - We record Method → origImp pairs into a small fixed array after each
+//     MSHookMessageEx call (Method pointer is stable across the hook).
+//   - method_getImplementation hook must be installed BEFORE any MSHookMessageEx
+//     call so that it is active when RuntimeHookChecker later queries those methods.
+//   - RH_HOOKED_METHOD_MAX = 8 covers all current hooks with headroom.
+
+#define RH_HOOKED_METHOD_MAX 8
+static Method  s_rh_methods[RH_HOOKED_METHOD_MAX];
+static IMP     s_rh_orig_imps[RH_HOOKED_METHOD_MAX];
+static int     s_rh_method_count = 0;
+
+static void rh_record_method(Method m, IMP origImp) {
+    if (!m || s_rh_method_count >= RH_HOOKED_METHOD_MAX) return;
+    s_rh_methods[s_rh_method_count] = m;
+    s_rh_orig_imps[s_rh_method_count] = origImp;
+    s_rh_method_count++;
+}
+
+static IMP (*orig_method_getImplementation)(Method m) = NULL;
+
+static IMP replaced_method_getImplementation(Method m) {
+    if (m) {
+        for (int i = 0; i < s_rh_method_count; i++) {
+            if (s_rh_methods[i] == m) {
+                return s_rh_orig_imps[i];
+            }
+        }
+    }
+    return orig_method_getImplementation(m);
+}
+
 // ─── BSLogCek + BSZInspection + cekL3Int ObjC-layer bypass ──────────────────
 //
 // BSLogCek (0x38a00 in blueshield.framework, DOPAMINE_WEAKNESS_2.md reason=0):
@@ -107,9 +161,10 @@ __attribute__((visibility("default"))) void canaryBypassInit(void)
 //
 // RUNTIME NOTE on stat()/opendir(): NSFileManager internally calls stat64() for
 // fileExistsAtPath: on modern iOS. The hooks here intercept the ObjC API layer.
-// If BSZInspection or cekL3Int bypass NSFileManager and call stat/opendir
-// directly (via POSIX), the hook_access/hook_open extensions in roothider_main.c
-// provide POSIX-layer coverage. stat() at the raw syscall level is not hooked.
+// If BSZInspection or cekL3Int bypass NSFileManager and call access() directly,
+// hook_access in roothider_main.c provides POSIX-layer coverage for known paths.
+// hook_open() was removed (MSHookFunctionChecker conflict). stat() at the raw
+// syscall level is not hooked.
 
 static const char *const kJailbreakPathPatterns[] = {
     "/var/jb/",                    // any /var/jb/ bind-mount path
@@ -165,32 +220,114 @@ static BOOL replaced_fileExistsAtPathIsDirectory(id self, SEL sel, NSString *pat
     return ret;
 }
 
+// +[MC1 getAllFramworks] (0x20394, blueshield.framework) calls
+// -[NSFileManager contentsOfDirectoryAtPath:error:] to list the app's
+// /Frameworks directory after c1Available != 0 (detection already fired).
+// It collects the result as evidence for the threat payload. Hooking here
+// cannot prevent detection (getAllFramworks is called post-detection), but
+// filters any jailbreak-named entries from the reported snapshot.
+//
+// RUNTIME NOTE: Dopamine injects dylibs via DYLD_INSERT_LIBRARIES; they are
+// NOT placed in the app's /Frameworks directory. This hook will never filter
+// anything in practice (no jailbreak entry exists there). It is defensive only,
+// guarding against future injection methods that might use the Frameworks path.
+//
+// RuntimeHookChecker bypass: this method is also recorded in the
+// method_getImplementation registry (rh_record_method) so that RuntimeHookChecker
+// sees the original Foundation IMP, not our replacement IMP in roothidehooks.dylib.
+
+static NSArray *(*orig_contentsOfDirectoryAtPath)(id self, SEL sel, NSString *path, NSError **err) = NULL;
+
+static NSArray *replaced_contentsOfDirectoryAtPath(id self, SEL sel, NSString *path, NSError **err) {
+    NSArray *result = orig_contentsOfDirectoryAtPath(self, sel, path, err);
+    RH_LOG("NSFileMgr.contentsOfDirectoryAtPath: %s count=%d", [path UTF8String] ?: "", (int)[result count]);
+    if (!result || [result count] == 0) return result;
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:[result count]];
+    for (NSString *entry in result) {
+        if (!jailbreakBypassShouldBlockPath(entry)) {
+            [filtered addObject:entry];
+        }
+    }
+    return [filtered copy];
+}
+
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
     RH_LOG("logScanBypassInit called");
 
-    // Hook +[OSLogStore localStoreAndReturnError:] → nil: disables BSLogCek.
+    // ── RuntimeHookChecker bypass: install method_getImplementation hook first ──
+    // Must be installed before any MSHookMessageEx so it is in place when
+    // _TtC9MBRaspSdk18RuntimeHookChecker later calls method_getImplementation.
+    // For every method we hook below, we capture the Method pointer before the
+    // hook and the original IMP after, then record them with rh_record_method.
+    // RuntimeHookChecker sees the original Foundation IMP → valid __TEXT range.
+    MSHookFunction((void *)method_getImplementation,
+                   (void *)replaced_method_getImplementation,
+                   (void **)&orig_method_getImplementation);
+    RH_LOG("method_getImplementation hooked (RuntimeHookChecker bypass)");
+
+    // ── FishHookChecker safety note ──────────────────────────────────────────
+    // _TtC9MBRaspSdk15FishHookChecker scans __DATA.__la_symbol_ptr and
+    // __nl_symbol_ptr for symbol rebinding outside dyld_shared_cache.
+    // RUNTIME NOTE: all our hooks use litehook (instruction replacement) or
+    // MSHookFunction (trampoline in original function body). Neither approach
+    // rebinds lazy or non-lazy symbol pointers in __DATA. FishHookChecker will
+    // find no rebound pointers and report clean. No bypass needed.
+
+    // ── Hook +[OSLogStore localStoreAndReturnError:] → nil: disables BSLogCek ─
     Class osLogStoreMeta = objc_getMetaClass("OSLogStore");
     RH_LOG("OSLogStore metaclass=%p", osLogStoreMeta);
     if (osLogStoreMeta) {
+        Method m_ols = class_getInstanceMethod(osLogStoreMeta,
+                                               @selector(localStoreAndReturnError:));
         MSHookMessageEx(osLogStoreMeta,
                         @selector(localStoreAndReturnError:),
                         (IMP)replaced_localStoreAndReturnError,
                         (IMP *)&orig_localStoreAndReturnError);
-        RH_LOG("OSLogStore.localStoreAndReturnError hooked");
+        rh_record_method(m_ols, (IMP)orig_localStoreAndReturnError);
+        RH_LOG("OSLogStore.localStoreAndReturnError hooked, orig=%p", (void *)orig_localStoreAndReturnError);
     }
 
-    // Hook NSFileManager file-existence checks for jailbreak path blocking.
+    // ── Hook NSFileManager file-existence checks ──────────────────────────────
     // Covers BSZInspection Zebra/Zim scan and cekL3Int package metadata reads.
-    MSHookMessageEx([NSFileManager class],
-                    @selector(fileExistsAtPath:),
-                    (IMP)replaced_fileExistsAtPath,
-                    (IMP *)&orig_fileExistsAtPath);
-    RH_LOG("NSFileManager.fileExistsAtPath: hooked");
-    MSHookMessageEx([NSFileManager class],
-                    @selector(fileExistsAtPath:isDirectory:),
-                    (IMP)replaced_fileExistsAtPathIsDirectory,
-                    (IMP *)&orig_fileExistsAtPathIsDirectory);
-    RH_LOG("NSFileManager.fileExistsAtPath:isDirectory: hooked");
-    RH_LOG("logScanBypassInit complete");
+    {
+        Method m_fep = class_getInstanceMethod([NSFileManager class],
+                                               @selector(fileExistsAtPath:));
+        MSHookMessageEx([NSFileManager class],
+                        @selector(fileExistsAtPath:),
+                        (IMP)replaced_fileExistsAtPath,
+                        (IMP *)&orig_fileExistsAtPath);
+        rh_record_method(m_fep, (IMP)orig_fileExistsAtPath);
+        RH_LOG("NSFileManager.fileExistsAtPath: hooked, orig=%p", (void *)orig_fileExistsAtPath);
+    }
+    {
+        Method m_fepid = class_getInstanceMethod([NSFileManager class],
+                                                 @selector(fileExistsAtPath:isDirectory:));
+        MSHookMessageEx([NSFileManager class],
+                        @selector(fileExistsAtPath:isDirectory:),
+                        (IMP)replaced_fileExistsAtPathIsDirectory,
+                        (IMP *)&orig_fileExistsAtPathIsDirectory);
+        rh_record_method(m_fepid, (IMP)orig_fileExistsAtPathIsDirectory);
+        RH_LOG("NSFileManager.fileExistsAtPath:isDirectory: hooked, orig=%p",
+               (void *)orig_fileExistsAtPathIsDirectory);
+    }
+
+    // ── Hook NSFileManager contentsOfDirectoryAtPath:error: ──────────────────
+    // Defensive: +[MC1 getAllFramworks] (0x20394) calls this to list the app's
+    // /Frameworks directory after detection. Jailbreak dylibs are NOT in the
+    // Frameworks dir (injected via DYLD_INSERT_LIBRARIES), so this will not
+    // filter anything in practice. Recorded for RuntimeHookChecker bypass.
+    {
+        Method m_coddap = class_getInstanceMethod([NSFileManager class],
+                                                  @selector(contentsOfDirectoryAtPath:error:));
+        MSHookMessageEx([NSFileManager class],
+                        @selector(contentsOfDirectoryAtPath:error:),
+                        (IMP)replaced_contentsOfDirectoryAtPath,
+                        (IMP *)&orig_contentsOfDirectoryAtPath);
+        rh_record_method(m_coddap, (IMP)orig_contentsOfDirectoryAtPath);
+        RH_LOG("NSFileManager.contentsOfDirectoryAtPath:error: hooked, orig=%p",
+               (void *)orig_contentsOfDirectoryAtPath);
+    }
+
+    RH_LOG("logScanBypassInit complete, recorded %d methods", s_rh_method_count);
 }

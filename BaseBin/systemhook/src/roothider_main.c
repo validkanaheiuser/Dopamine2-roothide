@@ -12,7 +12,6 @@
 #include <objc/runtime.h>
 #include <stdlib.h>
 #include <stdarg.h>
-#include <fcntl.h>
 #include <os/log.h>
 
 // Diagnostic logger for Apple Unified Logging (idevicesyslog / log stream)
@@ -277,9 +276,13 @@ static inline void rh_log(const char *fmt, ...) {
 // │       the cekL2Int check but are not documented in DOPAMINE_WEAKNESS_2.md.
 // │   (b) sandbox write — open("/private/jailbreak.txt", O_WRONLY|O_CREAT, ...)
 // │       succeeds, proving sandbox escape.
-// │       STATUS: NEW — hook_open() added below. RUNTIME NOTE: on stock Dopamine
-// │       the app sandbox is intact; this write likely already fails. Hook is
-// │       defensive.
+// │       STATUS: COVERED. The app sandbox on Dopamine rootless is intact and
+// │       already denies this write (EPERM). Additionally hook_fork (c) prevents
+// │       any forked child from running. hook_open() was removed: litehook writes
+// │       B <offset> at the open() prologue, which MSHookFunctionChecker
+// │       (_TtC9MBRaspSdk21MSHookFunctionChecker, DOPAMINE_WEAKNESS_3.md)
+// │       explicitly detects as reason=5 — a worse outcome than leaving (b)
+// │       unhooked. The sandbox denial is the primary guard.
 // │   (c) fork() succeeds, proving the process can spawn children (sandbox bypass).
 // │       STATUS: NEW — hook_fork() added below. RUNTIME NOTE: same — sandbox
 // │       may already block fork() on stock Dopamine. Hook is defensive.
@@ -287,17 +290,16 @@ static inline void rh_log(const char *fmt, ...) {
 // │ cekL3Int (0x32d9c): package metadata analysis — reads dpkg/apt package
 // │   databases to verify which jailbreak packages are installed.
 // │   STATUS: IMPLEMENTED (two-layer coverage):
-// │   Layer 1 — POSIX: hook_access() and hook_open() (below) check
-// │     kBlockedPathPatterns with strstr, blocking paths containing
-// │     "/var/lib/dpkg/", "/var/lib/apt/", and "/var/jb/". The strstr check
-// │     works for BOTH the /var/jb/-prefixed path (bind-mount) AND the direct
-// │     jbroot path (.jbroot-XXXX/var/lib/dpkg/ also contains the substring
-// │     "/var/lib/dpkg/"). Sandbox extensions grant the banking app READ
-// │     access to the jbroot path — the blocking happens before the filesystem
-// │     call reaches the kernel.
-// │   Layer 2 — NSFileManager: logScanBypassInit() (in canary_bypass.x, called
-// │     below) hooks NSFileManager -fileExistsAtPath: and
-// │     -fileExistsAtPath:isDirectory: to return NO for all kJailbreakPathPatterns.
+// │   Layer 1 — POSIX: hook_access() checks kBlockedPathPatterns with strstr,
+// │     blocking paths containing "/var/lib/dpkg/", "/var/lib/apt/", "/var/jb/".
+// │     strstr works for BOTH the /var/jb/-prefixed (bind-mount) AND direct
+// │     jbroot path (.jbroot-XXXX/var/lib/dpkg/ still contains "/var/lib/dpkg/").
+// │     NOTE: hook_open() was removed (MSHookFunctionChecker conflict, see (b)
+// │     above). If cekL3Int calls open() without access() first, it can bypass
+// │     Layer 1; Layer 2 provides ObjC-level coverage.
+// │   Layer 2 — NSFileManager: logScanBypassInit() (canary_bypass.x) hooks
+// │     NSFileManager -fileExistsAtPath:, -fileExistsAtPath:isDirectory:, and
+// │     -contentsOfDirectoryAtPath:error: to block kJailbreakPathPatterns.
 // │   RUNTIME NOTE: stat()/opendir() at the raw syscall level are NOT hooked.
 // │   If cekL3Int bypasses POSIX and NSFileManager to call stat64 directly,
 // │   the block would not apply. No evidence of direct syscall use in the
@@ -305,7 +307,7 @@ static inline void rh_log(const char *fmt, ...) {
 // │
 // │ BSZInspection (0x7f8e0 / 0x610c): partition scan, Zebra/Zim framework scan.
 // │   STATUS: IMPLEMENTED (same two-layer coverage as cekL3Int):
-// │   Layer 1: hook_access + hook_open block paths containing "/var/jb/",
+// │   Layer 1: hook_access() blocks paths containing "/var/jb/",
 // │     "/Applications/Zebra.app", "/Applications/Sileo.app", "/Applications/
 // │     Cydia.app", "/usr/share/zebra/". The strstr match catches both
 // │     /var/jb/-prefixed and jbroot-extended paths.
@@ -415,7 +417,7 @@ static const char *const kBlockedAccessPaths[] = {
 };
 
 // Substring patterns for jailbreak path blocking (strstr, not strcmp).
-// Used by hook_access() and hook_open() for BSZInspection and cekL3Int coverage.
+// Used by hook_access() for BSZInspection and cekL3Int coverage.
 // The strstr match works for BOTH /var/jb/-prefixed paths (bind-mount symlink)
 // AND direct jbroot paths (.jbroot-XXXX/.../var/lib/dpkg/status still contains
 // the substring "/var/lib/dpkg/"). All patterns are jailbreak-specific; no
@@ -483,58 +485,6 @@ static pid_t hook_fork(void) {
         return -1;
     }
     return (pid_t)syscall(SYS_fork);
-}
-
-// ─── reason=0 cekL2Int: sandbox-write detection bypass ───────────────────────
-//
-// BSHasApp.cekL2Int (0x324d4) tests whether the app can write to
-// /private/jailbreak.txt. On a stock device the sandbox denies this write.
-// On jailbroken devices where the sandbox is weakened, the write succeeds and
-// contributes a bit to bitmask=28, triggering reason=0.
-//
-// We hook open() to return EPERM for /private/jailbreak.txt in any write mode,
-// mimicking the sandbox denial. All other paths pass through to the kernel via
-// syscall(SYS_open) (litehook has no trampoline; caller-transparent).
-//
-// Varargs: open() is int open(const char*, int flags, ...) — the optional third
-// arg is mode_t, passed only when O_CREAT is in flags. On arm64, mode_t is
-// promoted to int in the variadic call; va_arg(ap, int) extracts it correctly.
-//
-// RUNTIME NOTE: on stock Dopamine (intact sandbox), this write already fails.
-// This hook is defensive; it is harmless if the write already fails naturally.
-
-static int hook_open(const char *path, int flags, ...) {
-    if (gShouldHideJailbreak && path) {
-        // Block /private/jailbreak.txt writes (cekL2Int sandbox-write test).
-        if (strcmp(path, "/private/jailbreak.txt") == 0 &&
-            (flags & (O_WRONLY | O_RDWR | O_CREAT))) {
-            RH_LOG("open BLOCKED(jailbreak.txt): flags=0x%x", flags);
-            errno = EPERM;
-            return -1;
-        }
-        // Block open() to jailbreak paths (BSZInspection, cekL3Int).
-        // Mirrors the kBlockedPathPatterns check in hook_access() above.
-        for (int i = 0; kBlockedPathPatterns[i]; i++) {
-            if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
-                RH_LOG("open BLOCKED(pattern=%s): %s flags=0x%x", kBlockedPathPatterns[i], path, flags);
-                errno = ENOENT;
-                return -1;
-            }
-        }
-    }
-    mode_t mode = 0;
-    if (flags & O_CREAT) {
-        va_list ap;
-        va_start(ap, flags);
-        mode = (mode_t)va_arg(ap, int);
-        va_end(ap);
-    }
-    int ret = (int)syscall(SYS_open, path, flags, mode);
-    // Log successful opens (fd>=0) when hiding jailbreak — helps trace what BS reads.
-    if (gShouldHideJailbreak && path && ret >= 0) {
-        RH_LOG("open PASS(fd=%d): %s flags=0x%x", ret, path, flags);
-    }
-    return ret;
 }
 
 // ─── Fix B: dyld image-list hooks to hide jailbreak dylibs from MC1 ──────────
@@ -1340,10 +1290,6 @@ void roothide_init_with_executable(const char* executable)
 		// reason=0 cekL2Int: block fork() to clear the fork-success jailbreak bit.
 		litehook_hook_function(fork, hook_fork);
 		RH_LOG("hook_fork installed");
-
-		// reason=0 cekL2Int: block writes to /private/jailbreak.txt.
-		litehook_hook_function(open, hook_open);
-		RH_LOG("hook_open installed");
 
 		// reason=9: developer_mode_status sysctl intercepts for app processes.
 		if (__builtin_available(iOS 16.0, *)) {
