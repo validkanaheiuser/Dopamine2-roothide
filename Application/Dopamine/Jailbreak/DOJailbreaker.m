@@ -623,6 +623,8 @@ void *boomerang_server(struct boomerang_info *info)
 */
 
 /*************************** roothide specific *******************/
+[[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"yuko's tweaks stage") debug:NO];
+
 [[DOUIManager sharedInstance] sendLog:DOLocalizedString(@"RootHide Stage") debug:NO];
 
 int ret = basebin_generate(false);

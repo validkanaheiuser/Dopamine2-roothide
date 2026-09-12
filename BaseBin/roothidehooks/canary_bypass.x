@@ -1,9 +1,21 @@
 #import <Foundation/Foundation.h>
 #import <substrate.h>
 #import <objc/runtime.h>
-#import <syslog.h>
+#include <os/log.h>
+#include <stdio.h>
+#include <stdarg.h>
 
-#define RH_LOG(fmt, ...) syslog(LOG_WARNING, "[RHHIDE] " fmt, ##__VA_ARGS__)
+// Diagnostic logger for Apple Unified Logging (idevicesyslog / log stream)
+// Uses OS_LOG_TYPE_DEFAULT (<Notice>) with %{public}s to prevent <private> redaction
+static inline void rh_log(const char *fmt, ...) {
+    char buf[2048];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "[RHHIDE] %{public}s", buf);
+}
+#define RH_LOG(fmt, ...) rh_log(fmt, ##__VA_ARGS__)
 
 // BSDPMRHide (0x80600 in blueshield.framework) is a canary/honeypot ObjC class
 // designed by Singalarity BlueShield to detect ObjC hook frameworks
