@@ -432,8 +432,12 @@ static const char *const kBlockedPathPatterns[] = {
     "/Applications/Zebra.app",  // Zebra package manager (BSZInspection)
     "/Applications/Sileo.app",  // Sileo package manager (BSZInspection)
     "/usr/share/zebra/",        // Zebra data directory (BSZInspection)
-    "/Library/MobileSubstrate/",// MobileSubstrate/ElleKit tweak inject path
-    "/usr/lib/TweakInject/",    // TweakInject path (alternate substrate path)
+    // NOTE: /Library/MobileSubstrate/ and /usr/lib/TweakInject/ intentionally
+    // NOT blocked here. ElleKit uses access() on these paths to scan for tweaks
+    // before dlopen-ing them. Blocking these paths prevents ElleKit from injecting
+    // any tweak into hide-listed apps. Dyld image list filtering (is_jailbreak_image
+    // in Fix B) already hides loaded tweak dylibs from RASP — access() blocking is
+    // redundant for detection and causes the side-effect of breaking tweak injection.
     NULL
 };
 
