@@ -399,7 +399,21 @@ int roothide_launchd___posix_spawn_prehook(pid_t *restrict pidp, const char *res
 			//choicy may set these 
 			envbuf_unsetenv(&envc, "_SafeMode");
 			envbuf_unsetenv(&envc, "_MSSafeMode");
-	
+
+			// Inject systemhook into hide-listed apps so the child's initializer() runs.
+			// Without this, DYLD_INSERT_LIBRARIES is absent; systemhook never loads;
+			// gShouldHideJailbreak is never set; no RASP bypass and no TweakLoader.
+			// HOOK_DYLIB_PATH is "" during firstLoad (postinit:108), safely skipping
+			// injection before systemhook exists on disk.
+			// DYLD_IN_CACHE=0 mirrors posthook:239 — required on some devices to avoid
+			// vm_protect failure on dsc::__DATA_CONST.
+			if (roothideBlacklisted && HOOK_DYLIB_PATH && *HOOK_DYLIB_PATH) {
+				if (!envbuf_getenv((const char **)envc, "DYLD_INSERT_LIBRARIES")) {
+					envbuf_setenv(&envc, "DYLD_INSERT_LIBRARIES", HOOK_DYLIB_PATH);
+				}
+				envbuf_setenv(&envc, "DYLD_IN_CACHE", "0");
+			}
+
 			/* According to xnu, the new thread in new process will not run in userland until after copyout pid
 			https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/bsd/kern/kern_exec.c#L4321
 			https://github.com/apple-oss-distributions/xnu/blob/8d741a5de7ff4191bf97d57b9f54c2f6d4a15585/bsd/kern/kern_exec.c#L4882
