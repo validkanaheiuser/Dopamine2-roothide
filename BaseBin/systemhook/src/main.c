@@ -432,7 +432,12 @@ roothide_init_with_executable(gExecutablePath);
 		// We can hardcode /var/jb here since if it doesn't exist, loading TweakLoader.dylib is not going to work anyways
 		if (should_enable_tweaks()) {
 			const char *tweakLoaderPath = JBROOT_PATH("/usr/lib/TweakLoader.dylib");
-			if (access(tweakLoaderPath, F_OK) == 0) {
+			// Use stat() not access(): hook_access (installed above by
+			// roothide_init_with_executable) blocks JBROOT_PATH paths containing
+			// "/.jbroot-", which prevents TweakLoader from loading in hide-listed apps.
+			// stat() is not hooked so it bypasses the block.
+			struct stat tweakLoaderSt;
+			if (stat(tweakLoaderPath, &tweakLoaderSt) == 0) {
 				void *tweakLoaderHandle = dlopen(tweakLoaderPath, RTLD_NOW);
 				if (tweakLoaderHandle != NULL) {
 					dlclose(tweakLoaderHandle);
