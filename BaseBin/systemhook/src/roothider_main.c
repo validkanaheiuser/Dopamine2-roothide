@@ -291,9 +291,11 @@ static inline void rh_log(const char *fmt, ...) {
 // │   databases to verify which jailbreak packages are installed.
 // │   STATUS: IMPLEMENTED (two-layer coverage):
 // │   Layer 1 — POSIX: hook_access() checks kBlockedPathPatterns with strstr,
-// │     blocking paths containing "/var/lib/dpkg/", "/var/lib/apt/", "/var/jb/".
+// │     blocking paths containing "/var/lib/dpkg/", "/var/lib/apt/", "/etc/apt/".
 // │     strstr works for BOTH the /var/jb/-prefixed (bind-mount) AND direct
 // │     jbroot path (.jbroot-XXXX/var/lib/dpkg/ still contains "/var/lib/dpkg/").
+// │     NOTE: "/var/jb/" and "/.jbroot-" are NOT in kBlockedPathPatterns — those
+// │     blanket patterns break tweak injection (TweakLoader/ElleKit paths).
 // │     NOTE: hook_open() was removed (MSHookFunctionChecker conflict, see (b)
 // │     above). If cekL3Int calls open() without access() first, it can bypass
 // │     Layer 1; Layer 2 provides ObjC-level coverage.
@@ -307,10 +309,11 @@ static inline void rh_log(const char *fmt, ...) {
 // │
 // │ BSZInspection (0x7f8e0 / 0x610c): partition scan, Zebra/Zim framework scan.
 // │   STATUS: IMPLEMENTED (same two-layer coverage as cekL3Int):
-// │   Layer 1: hook_access() blocks paths containing "/var/jb/",
-// │     "/Applications/Zebra.app", "/Applications/Sileo.app", "/Applications/
-// │     Cydia.app", "/usr/share/zebra/". The strstr match catches both
-// │     /var/jb/-prefixed and jbroot-extended paths.
+// │   Layer 1: hook_access() blocks paths containing "/Applications/Zebra.app",
+// │     "/Applications/Sileo.app", "/Applications/Cydia.app", "/usr/share/zebra/".
+// │     strstr catches /var/jb/-prefixed paths too (e.g. /var/jb/Applications/
+// │     Zebra.app still contains "/Applications/Zebra.app"). "/var/jb/" blanket
+// │     NOT used — breaks TweakLoader injection (see kBlockedPathPatterns comment).
 // │   Layer 2: NSFileManager hooks in logScanBypassInit block the same patterns.
 // │   Evidence: checkZimFrameworkInternal: (selector 0x610c) checks for Zebra/Zim
 // │   framework binaries. The path component strings above cover all known iOS
@@ -418,13 +421,22 @@ static const char *const kBlockedAccessPaths[] = {
 
 // Substring patterns for jailbreak path blocking (strstr, not strcmp).
 // Used by hook_access() for BSZInspection and cekL3Int coverage.
-// The strstr match works for BOTH /var/jb/-prefixed paths (bind-mount symlink)
-// AND direct jbroot paths (.jbroot-XXXX/.../var/lib/dpkg/status still contains
-// the substring "/var/lib/dpkg/"). All patterns are jailbreak-specific; no
-// legitimate banking-app access to these path components exists.
+//
+// IMPORTANT: Do NOT add "/var/jb/" or "/.jbroot-" here. Those blanket patterns
+// block ALL jailbreak infrastructure paths (TweakLoader, TweakInject scan, etc.)
+// because systemhook itself uses JBROOT_PATH() which resolves to "/var/jb/...".
+// Blocking "/var/jb/" prevents TweakLoader from loading and prevents ElleKit from
+// scanning /var/jb/usr/lib/TweakInject/ — breaking all tweak injection for
+// hide-listed apps.
+//
+// Each pattern below is specific enough to block what BlueShield/RASP actually
+// checks without collateral damage to jailbreak infrastructure:
+// - "/var/jb/var/lib/dpkg/status" still matches "/var/lib/dpkg/" ✓
+// - "/var/jb/etc/apt/" still matches "/etc/apt/" ✓
+// - "/var/jb/Applications/Cydia.app" still matches "/Applications/Cydia.app" ✓
+// The /var/jb/ and /.jbroot- prefix is therefore redundant for blocking RASP
+// and harmful for jailbreak functionality.
 static const char *const kBlockedPathPatterns[] = {
-    "/var/jb/",                 // any path under the /var/jb bind-mount
-    "/.jbroot-",                // direct jbroot path (.jbroot-XXXX/...)
     "/var/lib/dpkg/",           // dpkg package database (cekL3Int)
     "/var/lib/apt/",            // apt package lists (cekL3Int)
     "/etc/apt/",                // apt configuration (also at /var/jb/etc/apt via bind)
@@ -434,10 +446,8 @@ static const char *const kBlockedPathPatterns[] = {
     "/usr/share/zebra/",        // Zebra data directory (BSZInspection)
     // NOTE: /Library/MobileSubstrate/ and /usr/lib/TweakInject/ intentionally
     // NOT blocked here. ElleKit uses access() on these paths to scan for tweaks
-    // before dlopen-ing them. Blocking these paths prevents ElleKit from injecting
-    // any tweak into hide-listed apps. Dyld image list filtering (is_jailbreak_image
-    // in Fix B) already hides loaded tweak dylibs from RASP — access() blocking is
-    // redundant for detection and causes the side-effect of breaking tweak injection.
+    // before dlopen-ing them. Dyld image list filtering (is_jailbreak_image in
+    // Fix B) already hides loaded tweak dylibs from RASP.
     NULL
 };
 
