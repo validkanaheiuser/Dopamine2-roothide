@@ -656,6 +656,85 @@ static void init_image_list_hooks(void) {
     litehook_hook_function(_dyld_get_image_vmaddr_slide, hook__dyld_get_image_vmaddr_slide);
 }
 
+// ─── Fix E: dladdr hook to block jailbreak image path disclosure ──────────────
+//
+// PerimeterX_SDK and TMXProfiling register callbacks via
+// __dyld_register_func_for_add_image. dyld immediately fires each callback for
+// ALL currently loaded images when it is registered. By the time PerimeterX/
+// TMXProfiling constructors run, systemhook.dylib's constructor has already run
+// (DYLD_INSERT_LIBRARIES order) — so InjectTest.dylib, ElleKit libinjector, and
+// systemhook itself are already loaded. dyld fires the callback for them.
+//
+// The callbacks call dladdr(mh, &info) to convert the mach_header* to a
+// filesystem path (info.dli_fname), then check it against a jailbreak blacklist.
+// Evidence: TMXProfiling imports _dladdr (binary-verified, Walmart v26.34).
+//
+// Fix: hook dladdr to return failure (0) when addr is the load address of a
+// jailbreak image. The callback cannot identify the image → no path to blacklist
+// → no detection.
+//
+// For non-jailbreak images: reconstruct Dl_info from dyld_all_image_infos.
+// dli_fname and dli_fbase are correct (from infoArray). dli_sname is NULL
+// because symtab lookup requires Mach-O parsing beyond scope here — RASP callers
+// only need dli_fname; production app code doesn't call dladdr for symbol names.
+//
+// litehook constraint: no trampolines — cannot call original dladdr. Reconstruction
+// from dyld_all_image_infos is the only trampoline-free alternative.
+//
+// Image-finding algorithm: "largest load address ≤ addr" is the standard approach
+// (same algorithm dladdr uses internally). For mh (exact load address), addr==base
+// → exact match. For IMP pointers inside __TEXT, finds the correct containing image
+// given non-overlapping dylib layout (guaranteed by dyld).
+//
+// Installation: inside the gShouldHideJailbreak block (roothide_init_with_executable),
+// BEFORE PerimeterX/TMXProfiling constructors run. dladdr is only hooked for
+// hide-listed apps; normal processes are unaffected.
+static int hook_dladdr(const void *addr, Dl_info *info) {
+    if (!info) return 0;
+
+    const struct dyld_all_image_infos *infos = get_image_infos();
+    if (!infos) {
+        memset(info, 0, sizeof(*info));
+        return 0;
+    }
+
+    // Find the image whose load address is the largest value ≤ addr.
+    const char *best_path = NULL;
+    const void *best_base = NULL;
+    for (uint32_t i = 0; i < infos->infoArrayCount; i++) {
+        const void *base = (const void *)infos->infoArray[i].imageLoadAddress;
+        if ((uintptr_t)base <= (uintptr_t)addr) {
+            if (!best_base || (uintptr_t)base > (uintptr_t)best_base) {
+                best_base = base;
+                best_path = infos->infoArray[i].imageFilePath;
+            }
+        }
+    }
+
+    if (!best_base) {
+        // addr below all image bases — cannot identify
+        memset(info, 0, sizeof(*info));
+        return 0;
+    }
+
+    // For jailbreak images: return failure so RASP callbacks cannot identify them.
+    if (gShouldHideJailbreak && is_jailbreak_image(best_path)) {
+        RH_LOG("dladdr BLOCKED: %p → %s", addr, best_path);
+        memset(info, 0, sizeof(*info));
+        return 0;
+    }
+
+    // For non-jailbreak images: fill in path and base address.
+    // dli_sname/dli_saddr are NULL — symtab parsing not implemented; RASP
+    // callers only use dli_fname, and callers that need symbol names are rare
+    // in production and handle NULL gracefully.
+    info->dli_fname = best_path;
+    info->dli_fbase = (void *)best_base;
+    info->dli_sname = NULL;
+    info->dli_saddr = NULL;
+    return 1;
+}
+
 // ─── Fix C: BSDPMRHide ObjC canary protection ────────────────────────────────
 //
 // Detection layer A from DOPAMINE_WEAKNESS.md: blueshield.framework declares a
@@ -1336,6 +1415,13 @@ void roothide_init_with_executable(const char* executable)
 			litehook_hook_function(__sysctlbyname, __sysctlbyname_hook);
 			RH_LOG("sysctl hooks installed (iOS16+)");
 		}
+
+		// Fix E: hook dladdr to block jailbreak image path disclosure from
+		// __dyld_register_func_for_add_image callbacks (PerimeterX + TMXProfiling).
+		// Must be installed before their constructors run — DYLD_INSERT_LIBRARIES
+		// ensures systemhook's constructor completes first.
+		litehook_hook_function(dladdr, hook_dladdr);
+		RH_LOG("hook_dladdr installed");
 
 		// Fix C — Phase 2: restore BSDPMRHide IMPs.
 		restore_canary_imps();
