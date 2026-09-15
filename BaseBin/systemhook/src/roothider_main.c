@@ -413,9 +413,35 @@ static bool gShouldHideJailbreak = false;
 // Only active when gShouldHideJailbreak is true (app is on the RootHide hide-list).
 
 static const char *const kBlockedAccessPaths[] = {
+    // Dopamine jailbreak infrastructure (bind-mounted at /usr/lib/ on rootless)
     "/usr/lib/roothideinit.dylib",
     "/usr/lib/libjailbreak.dylib",
     "/usr/lib/roothidepatch.dylib",
+    // Fix D: Exact-match paths that bypass kBlockedPathPatterns trailing-slash patterns.
+    //
+    // FraudForce.framework and PerimeterX_SDK.framework check these paths WITHOUT a
+    // trailing slash (confirmed by binary string extraction from Walmart v26.34 IPA).
+    // kBlockedPathPatterns uses strstr with "/usr/lib/TweakInject/" and "/etc/apt/"
+    // which do NOT match when the checked path itself has no trailing slash:
+    //   strstr("/usr/lib/TweakInject", "/usr/lib/TweakInject/") == NULL  ← GAP
+    //   strstr("/etc/apt", "/etc/apt/") == NULL                           ← GAP
+    // These exact entries close those gaps without breaking ElleKit's tweak scanning
+    // (ElleKit calls access() on specific dylib FILES inside those directories, not on
+    // the directories themselves — exact matches don't intercept those calls).
+    "/usr/lib/TweakInject",                              // FraudForce dir existence check
+    "/usr/lib/substrate",                                // FraudForce substrate dir check
+    "/etc/apt",                                          // PerimeterX apt dir check (no slash)
+    "/Library/MobileSubstrate/MobileSubstrate.dylib",   // PerimeterX + FraudForce file check
+    "/usr/sbin/sshd",                                    // PerimeterX classic jailbreak check
+    "/bin/bash",                                         // PerimeterX classic jailbreak check
+    // FraudForce additional exact-path checks (binary-verified from Walmart v26.34)
+    "/usr/lib/libhooker.dylib",
+    "/usr/lib/libsubstitute.dylib",
+    "/usr/lib/libcycript.dylib",
+    "/usr/sbin/frida-server",
+    "/usr/libexec/cydia",
+    "/usr/libexec/sftp-server",
+    "/usr/libexec/ssh-keysign",
     NULL
 };
 
