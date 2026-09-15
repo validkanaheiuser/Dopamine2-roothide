@@ -177,10 +177,37 @@ static const char *const kJailbreakPathPatterns[] = {
     NULL
 };
 
+// Exact-match blocklist for Walmart RASP (FraudForce + PerimeterX).
+// FraudForce calls fopen() and PerimeterX calls NSFileManager on these paths
+// WITHOUT a trailing slash — strstr patterns above do not match them.
+// Safe to use strcmp: none of these are legitimate app file I/O targets,
+// and ElleKit scans /usr/lib/TweakInject/ subdirs via open()/access(), not fopen().
+static const char *const kWalmartBlockedExactPaths[] = {
+    "/usr/lib/TweakInject",
+    "/usr/lib/substrate",
+    "/etc/apt",
+    "/Library/MobileSubstrate/MobileSubstrate.dylib",
+    "/usr/sbin/sshd",
+    "/bin/bash",
+    "/usr/lib/roothideinit.dylib",
+    "/usr/lib/libjailbreak.dylib",
+    "/usr/lib/libhooker.dylib",
+    "/usr/lib/libsubstitute.dylib",
+    "/usr/lib/libcycript.dylib",
+    "/usr/sbin/frida-server",
+    "/usr/libexec/cydia",
+    "/usr/libexec/sftp-server",
+    "/usr/libexec/ssh-keysign",
+    NULL
+};
+
 static bool jailbreakBypassShouldBlockPath(NSString *path) {
     if (!path) return false;
     const char *cpath = [path UTF8String];
     if (!cpath) return false;
+    for (int i = 0; kWalmartBlockedExactPaths[i]; i++) {
+        if (strcmp(cpath, kWalmartBlockedExactPaths[i]) == 0) return true;
+    }
     for (int i = 0; kJailbreakPathPatterns[i]; i++) {
         if (strstr(cpath, kJailbreakPathPatterns[i])) return true;
     }
@@ -236,6 +263,41 @@ static BOOL replaced_fileExistsAtPathIsDirectory(id self, SEL sel, NSString *pat
 // method_getImplementation registry (rh_record_method) so that RuntimeHookChecker
 // sees the original Foundation IMP, not our replacement IMP in roothidehooks.dylib.
 
+// ─── fopen bypass: FraudForce filesystem path checks ─────────────────────────
+//
+// FraudForce.framework (Walmart v26.34) does NOT import _access. It checks
+// jailbreak path existence via fopen(path, "r"). If fopen returns non-NULL,
+// the file/dir exists → jailbreak detected.
+//
+// We hook fopen via MSHookFunction (trampoline needed to call orig for non-blocked
+// paths). Blocked paths return NULL with errno=ENOENT, matching what would happen
+// on a stock device where these paths do not exist.
+//
+// Note: fopen on a directory path returns NULL (EISDIR) on stock iOS already;
+// blocking it here is consistent behavior and not observable by the app.
+
+static FILE *(*orig_fopen)(const char *path, const char *mode) = NULL;
+
+static FILE *replaced_fopen(const char *path, const char *mode) {
+    if (path) {
+        for (int i = 0; kWalmartBlockedExactPaths[i]; i++) {
+            if (strcmp(path, kWalmartBlockedExactPaths[i]) == 0) {
+                RH_LOG("fopen BLOCKED(exact): %s", path);
+                errno = ENOENT;
+                return NULL;
+            }
+        }
+        for (int i = 0; kJailbreakPathPatterns[i]; i++) {
+            if (strstr(path, kJailbreakPathPatterns[i])) {
+                RH_LOG("fopen BLOCKED(pattern): %s", path);
+                errno = ENOENT;
+                return NULL;
+            }
+        }
+    }
+    return orig_fopen(path, mode);
+}
+
 static NSArray *(*orig_contentsOfDirectoryAtPath)(id self, SEL sel, NSString *path, NSError **err) = NULL;
 
 static NSArray *replaced_contentsOfDirectoryAtPath(id self, SEL sel, NSString *path, NSError **err) {
@@ -288,8 +350,20 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
         RH_LOG("OSLogStore.localStoreAndReturnError hooked, orig=%p", (void *)orig_localStoreAndReturnError);
     }
 
+    // ── Hook fopen to block FraudForce filesystem checks (Walmart RASP) ─────
+    // FraudForce does NOT import access(). It calls fopen(path, "r") on each
+    // jailbreak path from its 35-entry blacklist (binary-verified, Walmart v26.34).
+    // orig_fopen trampoline forwards non-blocked calls to the real fopen.
+    MSHookFunction((void *)fopen,
+                   (void *)replaced_fopen,
+                   (void **)&orig_fopen);
+    RH_LOG("fopen hooked (FraudForce bypass), orig=%p", (void *)orig_fopen);
+
     // ── Hook NSFileManager file-existence checks ──────────────────────────────
     // Covers BSZInspection Zebra/Zim scan and cekL3Int package metadata reads.
+    // Also covers PerimeterX which calls fileExistsAtPath: on Walmart blacklist
+    // paths. jailbreakBypassShouldBlockPath now checks kWalmartBlockedExactPaths
+    // (exact strcmp) in addition to kJailbreakPathPatterns (strstr).
     {
         Method m_fep = class_getInstanceMethod([NSFileManager class],
                                                @selector(fileExistsAtPath:));
