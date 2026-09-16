@@ -4,6 +4,7 @@
 #include <os/log.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <sys/mount.h>
 
 // Diagnostic logger for Apple Unified Logging (idevicesyslog / log stream)
 // Uses OS_LOG_TYPE_DEFAULT (<Notice>) with %{public}s to prevent <private> redaction
@@ -85,6 +86,7 @@ __attribute__((visibility("default"))) void canaryBypassInit(void)
 //   -[NSFileManager fileExistsAtPath:]       → replaced_fileExistsAtPath
 //   -[NSFileManager fileExistsAtPath:isDirectory:] → replaced_fileExistsAtPathIsDirectory
 //   -[NSFileManager contentsOfDirectoryAtPath:error:] → replaced_contentsOfDirectoryAtPath
+//   -[NSFileManager isReadableFileAtPath:]   → replaced_isReadableFileAtPath
 //
 // After each MSHookMessageEx the method table entry has our IMP. When
 // RuntimeHookChecker calls method_getImplementation(m) for those methods it
@@ -247,6 +249,18 @@ static BOOL replaced_fileExistsAtPathIsDirectory(id self, SEL sel, NSString *pat
     return ret;
 }
 
+static BOOL (*orig_isReadableFileAtPath)(id self, SEL sel, NSString *path) = NULL;
+
+static BOOL replaced_isReadableFileAtPath(id self, SEL sel, NSString *path) {
+    if (jailbreakBypassShouldBlockPath(path)) {
+        RH_LOG("NSFileMgr.isReadableFileAtPath BLOCKED: %s", [path UTF8String] ?: "");
+        return NO;
+    }
+    BOOL ret = orig_isReadableFileAtPath(self, sel, path);
+    if (ret) RH_LOG("NSFileMgr.isReadableFileAtPath PASS(YES): %s", [path UTF8String] ?: "");
+    return ret;
+}
+
 // +[MC1 getAllFramworks] (0x20394, blueshield.framework) calls
 // -[NSFileManager contentsOfDirectoryAtPath:error:] to list the app's
 // /Frameworks directory after c1Available != 0 (detection already fired).
@@ -384,6 +398,21 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
         rh_record_method(m_fepid, (IMP)orig_fileExistsAtPathIsDirectory);
         RH_LOG("NSFileManager.fileExistsAtPath:isDirectory: hooked, orig=%p",
                (void *)orig_fileExistsAtPathIsDirectory);
+    }
+    // ── Hook NSFileManager isReadableFileAtPath: ──────────────────────────────
+    // cekL1Int (BSHasApp) in BlueShield uses an obfuscated NSFileManager selector
+    // to check each path in its input array. MBRaspSdk sub_12410 uses the same
+    // SCP_StrDeobf pattern with isReadableFileAtPath:. Hooking it here closes the
+    // gap: /var/jb/... paths that exist on Dopamine rootless return NO instead of YES.
+    {
+        Method m_rfap = class_getInstanceMethod([NSFileManager class],
+                                               @selector(isReadableFileAtPath:));
+        MSHookMessageEx([NSFileManager class],
+                        @selector(isReadableFileAtPath:),
+                        (IMP)replaced_isReadableFileAtPath,
+                        (IMP *)&orig_isReadableFileAtPath);
+        rh_record_method(m_rfap, (IMP)orig_isReadableFileAtPath);
+        RH_LOG("NSFileManager.isReadableFileAtPath: hooked, orig=%p", (void *)orig_isReadableFileAtPath);
     }
 
     // ── Hook NSFileManager contentsOfDirectoryAtPath:error: ──────────────────

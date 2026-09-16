@@ -442,6 +442,27 @@ static const char *const kBlockedAccessPaths[] = {
     "/usr/libexec/cydia",
     "/usr/libexec/sftp-server",
     "/usr/libexec/ssh-keysign",
+    // Fix E: /var/jb/-prefixed versions for Dopamine rootless — BlueShield cekL2Int / MBRaspSdk check
+    // both the bare path and /var/jb/BAREPATH directly. strcmp does NOT match /var/jb/usr/sbin/sshd
+    // against the bare entry above. kBlockedPathPatterns strstr does NOT cover these because
+    // /var/jb/usr/sbin/sshd contains no dpkg/apt/Cydia substring. TweakLoader uses stat() not
+    // access() for JBROOT paths (main.c:434), so these exact-match entries don't interfere with it.
+    "/var/jb/usr/lib/roothideinit.dylib",
+    "/var/jb/usr/lib/libjailbreak.dylib",
+    "/var/jb/usr/lib/roothidepatch.dylib",
+    "/var/jb/usr/lib/TweakInject",
+    "/var/jb/usr/lib/substrate",
+    "/var/jb/etc/apt",
+    "/var/jb/Library/MobileSubstrate/MobileSubstrate.dylib",
+    "/var/jb/usr/sbin/sshd",
+    "/var/jb/bin/bash",
+    "/var/jb/usr/lib/libhooker.dylib",
+    "/var/jb/usr/lib/libsubstitute.dylib",
+    "/var/jb/usr/lib/libcycript.dylib",
+    "/var/jb/usr/sbin/frida-server",
+    "/var/jb/usr/libexec/cydia",
+    "/var/jb/usr/libexec/sftp-server",
+    "/var/jb/usr/libexec/ssh-keysign",
     NULL
 };
 
@@ -568,6 +589,11 @@ static bool is_jailbreak_image(const char *path) {
     // /Library/MobileSubstrate/DynamicLibraries/<foo>.dylib.
     if (strstr(path, "/usr/lib/TweakInject/") != NULL) return true;
     if (strstr(path, "/Library/MobileSubstrate/") != NULL) return true;
+    // Frida agent dylib injected via frida-server. When loaded via JBROOT_PATH it
+    // appears as "/var/jb/usr/lib/frida/..." (caught by "/var/jb/" above). If
+    // frida-server resolves to the bind-mounted path, it appears as
+    // "/usr/lib/frida/..." — add the bare path pattern to cover that case.
+    if (strstr(path, "/usr/lib/frida") != NULL) return true;
     return false;
 }
 
