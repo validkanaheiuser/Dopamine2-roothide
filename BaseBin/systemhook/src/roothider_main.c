@@ -1276,11 +1276,21 @@ void roothide_init_with_executable(const char* executable)
 		loadPathHook(); //requre jit
 	}
 
-	// Fixes A + B + C: For apps on the RootHide hide-list, activate full
-	// jailbreak detection bypass.
-	if (isRemovableBundlePath(executable) && jbclient_blacklist_check_pid(getpid())) {
+	// Fixes A + B + C: activate for apps on the RootHide hide-list OR for any
+	// app that ships a known RASP SDK (auto-detect via ObjC class presence).
+	// Auto-detect allows tweak dylibs from Sileo/TweakLoader to still load
+	// (TweakLoader is gated by the blacklist, not this code), while RASP bypass
+	// activates automatically without requiring the app to be on the hide-list.
+	// Fix B then hides those loaded tweaks from MC1's dyld image scan.
+	//
+	// objc_getClass is safe here: all static-dep ObjC classes (including
+	// BSDPMRHide and ZDefend) are registered by libobjc during dyld image-map,
+	// before any DYLD_INSERT_LIBRARIES constructor executes.
+	bool isRaspApp = (objc_getClass("BSDPMRHide") != NULL   // BlueShield (LienViet)
+	               || objc_getClass("ZDefend")     != NULL); // Zimperium z9 (VPBank)
+	if (isRemovableBundlePath(executable) && (jbclient_blacklist_check_pid(getpid()) || isRaspApp)) {
 		gShouldHideJailbreak = true;  // activates Fix B (dyld image-list filter)
-		RH_LOG("ACTIVATED pid=%d exe=%s", getpid(), executable);
+		RH_LOG("ACTIVATED pid=%d exe=%s rasp=%d", getpid(), executable, (int)isRaspApp);
 
 		// Fix A: hook access() for IOSSecuritySuite file-existence checks.
 		litehook_hook_function(access, hook_access);
