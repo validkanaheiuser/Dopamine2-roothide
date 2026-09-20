@@ -1315,6 +1315,16 @@ void roothide_init_with_executable(const char* executable)
 			void (*logScanBypassInit)(void) = dlsym(rhhooks, "logScanBypassInit");
 			RH_LOG("logScanBypassInit=%p", logScanBypassInit);
 			if (logScanBypassInit) logScanBypassInit();
+
+			// ZDefend bypass (VP Bank NEO):
+			// ZDefend uses Direct Syscalls (SVC 0x80) — POSIX/NSFileManager hooks
+			// are ineffective. Instead, cut the ObjC threat-reporting pipeline by
+			// swallowing +[ZDefend addDeviceStatusCallback:]. VPBankNEO never receives
+			// threat events → ZDefendViewController is never presented.
+			// Safe no-op if ZDefend class is absent (not VP Bank).
+			void (*zdefendBypassInit)(void) = dlsym(rhhooks, "zdefendBypassInit");
+			RH_LOG("zdefendBypassInit=%p", zdefendBypassInit);
+			if (zdefendBypassInit) zdefendBypassInit();
 		}
 		RH_LOG("bypass init complete");
 	}

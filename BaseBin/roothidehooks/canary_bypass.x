@@ -251,6 +251,73 @@ static NSArray *replaced_contentsOfDirectoryAtPath(id self, SEL sel, NSString *p
     return [filtered copy];
 }
 
+// ─── ZDefend bypass for VP Bank NEO ──────────────────────────────────────────
+//
+// ZDefend.framework (Zimperium z9 RASP SDK) uses Direct Syscalls (SVC 0x80) for
+// all internal checks — openat(#463), readlinkat(#465), stat64(#338) etc. — which
+// means POSIX-layer hooks (hook_access, replaced_fopen, NSFileManager hooks) are
+// completely ineffective against ZDefend's 284 sensor rules.
+//
+// However, ZDefend MUST go through the standard ObjC message-passing interface to
+// report threats back to the host app (VPBankNEO). The reporting pipeline is:
+//   +[ZDefend addDeviceStatusCallback:block] → callback fires → ZDefendManager
+//   → sub_1007E2DB4 → ZDefendViewController shown
+//
+// Fix: hook +[ZDefend addDeviceStatusCallback:] → swallow (drop the block).
+//   ZDefend detects threats internally (cannot be prevented without kernel patches),
+//   but can never deliver them to VPBankNEO → no ZDefendViewController appears.
+//
+// Why safe from _integrity_failed:
+//   MSHookMessageEx modifies the ObjC method dispatch table in __DATA (method_t.imp).
+//   _integrity_failed hashes the __text/__TEXT segment only. Modifying __DATA does
+//   NOT affect the text hash → _integrity_failed does not fire.
+//
+// Runtime uncertainty:
+//   _integrity_failed may also detect injected dylibs via direct Mach task_info
+//   and crash the process directly (not via callback). This code addresses the
+//   callback path only; if _integrity_failed directly terminates, that requires
+//   a separate fix (needs decompile of _integrity_failed in IDA instance 22ql).
+//
+// +[ZDefend setTrackingIds:tag2:] is also swallowed to prevent ZDefend from
+// registering this device session on the Zimperium cloud backend.
+
+static void replaced_ZDefend_addDeviceStatusCallback(id cls, SEL sel, id block)
+{
+    RH_LOG("ZDefend.addDeviceStatusCallback: SWALLOWED (threat pipeline cut)");
+    // intentionally drop block — VPBankNEO never receives any ZDefend threat event
+}
+
+static void replaced_ZDefend_setTrackingIds(id cls, SEL sel, NSArray *ids, id tag2)
+{
+    RH_LOG("ZDefend.setTrackingIds:tag2: SWALLOWED");
+}
+
+__attribute__((visibility("default"))) void zdefendBypassInit(void)
+{
+    Class zdCls = objc_getClass("ZDefend");
+    if (!zdCls) {
+        // ZDefend.framework is not present (not VP Bank) — safe no-op
+        RH_LOG("zdefendBypassInit: ZDefend class absent, skipping");
+        return;
+    }
+    RH_LOG("zdefendBypassInit: ZDefend found, cutting threat reporting pipeline");
+
+    // Hook +[ZDefend addDeviceStatusCallback:] on the ZDefend metaclass
+    Class zdMeta = objc_getMetaClass("ZDefend");
+
+    MSHookMessageEx(zdMeta,
+                    @selector(addDeviceStatusCallback:),
+                    (IMP)replaced_ZDefend_addDeviceStatusCallback,
+                    NULL);
+    RH_LOG("zdefendBypassInit: addDeviceStatusCallback: hooked");
+
+    MSHookMessageEx(zdMeta,
+                    @selector(setTrackingIds:tag2:),
+                    (IMP)replaced_ZDefend_setTrackingIds,
+                    NULL);
+    RH_LOG("zdefendBypassInit: setTrackingIds:tag2: hooked");
+}
+
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
     RH_LOG("logScanBypassInit called");
