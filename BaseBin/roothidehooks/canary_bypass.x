@@ -272,11 +272,14 @@ static NSArray *replaced_contentsOfDirectoryAtPath(id self, SEL sel, NSString *p
 //   _integrity_failed hashes the __text/__TEXT segment only. Modifying __DATA does
 //   NOT affect the text hash → _integrity_failed does not fire.
 //
-// Runtime uncertainty:
-//   _integrity_failed may also detect injected dylibs via direct Mach task_info
-//   and crash the process directly (not via callback). This code addresses the
-//   callback path only; if _integrity_failed directly terminates, that requires
-//   a separate fix (needs decompile of _integrity_failed in IDA instance 22ql).
+// IDA-confirmed (instance 22ql): _integrity_failed (0x1CEE54) CANNOT crash the process.
+//   Import table: ZDefend.framework imports NO termination API — abort(), exit(),
+//   _exit(), kill(), raise() are all absent. Only ___cxa_guard_abort (C++ init guard),
+//   _objc_sync_exit (@synchronized), and atexit-family registrations appear; none
+//   terminate the process. kill() is completely absent.
+//   _integrity_failed body: CFF state machine calling only sub_1CFA08 (loads two
+//   magic constants into W12/W13, RET — pure obfuscation bookkeeping) and
+//   ___stack_chk_fail (stack canary, unreachable on a clean stack). No crash path.
 //
 // +[ZDefend setTrackingIds:tag2:] is also swallowed to prevent ZDefend from
 // registering this device session on the Zimperium cloud backend.
