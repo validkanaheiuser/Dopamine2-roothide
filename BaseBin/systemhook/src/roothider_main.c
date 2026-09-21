@@ -528,6 +528,18 @@ static bool is_jailbreak_image(const char *path) {
     // /Library/MobileSubstrate/DynamicLibraries/<foo>.dylib.
     if (strstr(path, "/usr/lib/TweakInject/") != NULL) return true;
     if (strstr(path, "/Library/MobileSubstrate/") != NULL) return true;
+    // Dopamine/RootHide jbroot prefix — catches any dylib opened explicitly
+    // via JBROOT_PATH() (e.g. roothideinit.dylib, roothidehooks.dylib).
+    // hook_access already blocks /.jbroot- paths (kBlockedPathPatterns);
+    // this ensures the dyld image scan sees the same exclusion.
+    if (strstr(path, "/.jbroot-") != NULL) return true;
+    // ElleKit at its bind-mounted path /usr/lib/libellekit.dylib. When
+    // roothidehooks.dylib is loaded, dyld resolves its LC_LOAD_DYLIB
+    // /usr/lib/libellekit.dylib via the bind mount and stores that path.
+    // MC1 isFrameworkAvailable (0x20790 in blueshield) scans dyld image
+    // names against a hooking-framework blacklist that includes ElleKit
+    // (DOPAMINE_WEAKNESS_3.md, reason=5 / WS0026).
+    if (strstr(path, "/libellekit") != NULL) return true;
     return false;
 }
 
