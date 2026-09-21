@@ -609,11 +609,42 @@ static intptr_t hook__dyld_get_image_vmaddr_slide(uint32_t idx) {
     return compute_vmaddr_slide(hook__dyld_get_image_header(idx));
 }
 
+// Static scratch for the filtered dyld_all_image_infos returned by
+// hook__dyld_get_all_image_infos. Written once per call while gShouldHideJailbreak
+// is true; 512 slots cover all realistic app scenarios.
+#define MAX_FILTERED_IMAGES 512
+static struct dyld_image_info      g_filtered_image_array[MAX_FILTERED_IMAGES];
+static struct dyld_all_image_infos g_filtered_image_infos;
+
+// Hook for _dyld_get_all_image_infos (private dyld symbol, not in public SDK headers).
+// BlueShield MWkpr (0x6ae0) calls this private function directly to enumerate loaded
+// images, bypassing the public _dyld_image_count / _dyld_get_image_name hooks (Fix B).
+// Returning a copy with jailbreak images stripped is what stops reason=4 from firing.
+// No trampoline needed: get_image_infos() queries TASK_DYLD_INFO directly and
+// bypasses this symbol entirely, so there is no call-original risk.
+static const struct dyld_all_image_infos *hook__dyld_get_all_image_infos(void) {
+    const struct dyld_all_image_infos *infos = get_image_infos();
+    if (!infos) return NULL;
+    if (!gShouldHideJailbreak) return infos;
+
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < infos->infoArrayCount && n < MAX_FILTERED_IMAGES; i++) {
+        if (!is_jailbreak_image(infos->infoArray[i].imageFilePath))
+            g_filtered_image_array[n++] = infos->infoArray[i];
+    }
+    g_filtered_image_infos            = *infos;
+    g_filtered_image_infos.infoArray      = g_filtered_image_array;
+    g_filtered_image_infos.infoArrayCount = n;
+    return &g_filtered_image_infos;
+}
+
 static void init_image_list_hooks(void) {
     litehook_hook_function(_dyld_image_count,            hook__dyld_image_count);
     litehook_hook_function(_dyld_get_image_name,         hook__dyld_get_image_name);
     litehook_hook_function(_dyld_get_image_header,       hook__dyld_get_image_header);
     litehook_hook_function(_dyld_get_image_vmaddr_slide, hook__dyld_get_image_vmaddr_slide);
+    void *p = dlsym(RTLD_DEFAULT, "_dyld_get_all_image_infos");
+    if (p) litehook_hook_function(p, hook__dyld_get_all_image_infos);
 }
 
 // ─── Fix C: BSDPMRHide ObjC canary protection ────────────────────────────────
