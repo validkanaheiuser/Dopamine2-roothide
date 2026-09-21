@@ -507,14 +507,14 @@ static const struct dyld_all_image_infos *get_image_infos(void) {
 static bool is_jailbreak_image(const char *path) {
     if (!path) return false;
     // dyld_all_image_infos.infoArray[i].imageFilePath holds the path as passed to
-    // dlopen(), without resolving bind mounts. JBROOT_PATH() prepends "/var/jb",
-    // so dlopen(JBROOT_PATH("/usr/lib/roothideinit.dylib")) stores the path as
-    // "/var/jb/usr/lib/roothideinit.dylib" — contains "/var/jb/". This check
-    // covers roothideinit.dylib and any other jailbreak dylib opened via JBROOT_PATH.
+    // dlopen(), without resolving bind mounts. "/var/jb/" is the bind-mount path
+    // used by older jailbreaks (Unc0ver, Taurine). On RootHide/Dopamine, JBROOT_PATH
+    // expands to /var/containers/Bundle/Application/.jbroot-UUID/... but the
+    // /.jbroot- check further below catches those. This check covers legacy jailbreaks
+    // and any bind-mount remnant still appearing as /var/jb/.
     if (strstr(path, "/var/jb/") != NULL) return true;
-    // Dopamine base binaries (roothidehooks.dylib, etc.) are opened as
-    // JBROOT_PATH("/basebin/...") → "/var/jb/basebin/..." which already matches
-    // "/var/jb/" above, but this check also covers any bare "/basebin/" path.
+    // Covers /basebin/ paths that appear without the full jbroot prefix (e.g. if a
+    // dylib is loaded via a bind-mounted /basebin/ path).
     if (strstr(path, "/basebin/") != NULL) return true;
     // systemhook.dylib is loaded via DYLD_INSERT_LIBRARIES. Its path may appear as
     // "/var/jb/usr/lib/systemhook-<UUID>.dylib" (caught by "/var/jb/" above) or
@@ -528,18 +528,16 @@ static bool is_jailbreak_image(const char *path) {
     // /Library/MobileSubstrate/DynamicLibraries/<foo>.dylib.
     if (strstr(path, "/usr/lib/TweakInject/") != NULL) return true;
     if (strstr(path, "/Library/MobileSubstrate/") != NULL) return true;
-    // Dopamine/RootHide jbroot prefix — catches any dylib opened explicitly
-    // via JBROOT_PATH() (e.g. roothideinit.dylib, roothidehooks.dylib).
-    // hook_access already blocks /.jbroot- paths (kBlockedPathPatterns);
-    // this ensures the dyld image scan sees the same exclusion.
-    if (strstr(path, "/.jbroot-") != NULL) return true;
-    // ElleKit at its bind-mounted path /usr/lib/libellekit.dylib. When
-    // roothidehooks.dylib is loaded, dyld resolves its LC_LOAD_DYLIB
-    // /usr/lib/libellekit.dylib via the bind mount and stores that path.
+    // Dopamine/RootHide jbroot prefix — catches any dylib whose path passes
+    // through the .jbroot-UUID directory, regardless of bind-mount status.
+    // Covers roothideinit, roothidehooks, and CydiaSubstrate.framework
+    // (roothidehooks.dylib LC_LOAD_DYLIB: @rpath/CydiaSubstrate.framework/
+    // CydiaSubstrate; LC_RPATH: @loader_path/.jbroot/Library/Frameworks →
+    // expands through .jbroot-UUID). Consistent with kBlockedPathPatterns
+    // (line 427) which uses the same /.jbroot- pattern for hook_access.
     // MC1 isFrameworkAvailable (0x20790 in blueshield) scans dyld image
-    // names against a hooking-framework blacklist that includes ElleKit
-    // (DOPAMINE_WEAKNESS_3.md, reason=5 / WS0026).
-    if (strstr(path, "/libellekit") != NULL) return true;
+    // names for "CydiaSubstrate" / "ElleKit" (DOPAMINE_WEAKNESS_3.md §A.2).
+    if (strstr(path, "/.jbroot-") != NULL) return true;
     return false;
 }
 
