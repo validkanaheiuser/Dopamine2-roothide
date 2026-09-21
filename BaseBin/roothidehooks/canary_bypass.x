@@ -326,15 +326,31 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
     RH_LOG("logScanBypassInit called");
 
     // ── RuntimeHookChecker bypass: install method_getImplementation hook first ──
-    // Must be installed before any MSHookMessageEx so it is in place when
-    // _TtC9MBRaspSdk18RuntimeHookChecker later calls method_getImplementation.
-    // For every method we hook below, we capture the Method pointer before the
-    // hook and the original IMP after, then record them with rh_record_method.
-    // RuntimeHookChecker sees the original Foundation IMP → valid __TEXT range.
-    MSHookFunction((void *)method_getImplementation,
-                   (void *)replaced_method_getImplementation,
-                   (void **)&orig_method_getImplementation);
-    RH_LOG("method_getImplementation hooked (RuntimeHookChecker bypass)");
+    // Only needed for MBV Bank: _TtC9MBRaspSdk18RuntimeHookChecker (in MBRaspSdk)
+    // reads each method's IMP via method_getImplementation and flags any IMP that
+    // points outside a known system-framework __TEXT range. VPBank has no MBRaspSdk.
+    //
+    // On arm64e (A12+) MSHookFunction on method_getImplementation (arm64e libobjc)
+    // corrupts PAC (Pointer Authentication Code) state, crashing VPBankNEO during
+    // ZDefend.framework's initializer:
+    //   ZDefend ctor → NSFileManager moveItemAtPath: → NSOperation init
+    //   → KVO setup → method_t::imp(bool) const +56 → AUTIA trap
+    //   → EXC_BREAKPOINT "pointer authentication trap IA"
+    // Confirmed: VPBankNEO-2026-09-21-093224.ips frame 0, ESR "pointer auth trap IA".
+    //
+    // Guard: skip when ZDefend class is registered (= VPBank context).
+    // objc_getClass("ZDefend") is valid here: dyld registers ObjC classes during
+    // the image-mapping phase, before any constructors run. ZDefend's class is in
+    // the runtime hash table even though ZDefend.framework's +initialize has not
+    // yet executed. Same invariant used by save_canary_imps() for "BSDPMRHide".
+    if (objc_getClass("ZDefend") == NULL) {
+        MSHookFunction((void *)method_getImplementation,
+                       (void *)replaced_method_getImplementation,
+                       (void **)&orig_method_getImplementation);
+        RH_LOG("method_getImplementation hooked (RuntimeHookChecker bypass)");
+    } else {
+        RH_LOG("method_getImplementation hook SKIPPED (ZDefend present, PAC safety)");
+    }
 
     // ── FishHookChecker safety note ──────────────────────────────────────────
     // _TtC9MBRaspSdk15FishHookChecker scans __DATA.__la_symbol_ptr and
