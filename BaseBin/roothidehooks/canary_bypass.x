@@ -4,6 +4,8 @@
 #include <os/log.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <dlfcn.h>
+#include <pthread.h>
 
 // RHHIDE_DEBUG: define at compile time (-DRHHIDE_DEBUG) to enable OS-log diagnostics.
 // Production builds must NOT define it: RASP tools (ZDefend, BlueShield) call
@@ -282,31 +284,49 @@ static NSArray *replaced_contentsOfDirectoryAtPath(id self, SEL sel, NSString *p
 // means POSIX-layer hooks (hook_access, replaced_fopen, NSFileManager hooks) are
 // completely ineffective against ZDefend's 284 sensor rules.
 //
-// However, ZDefend MUST go through the standard ObjC message-passing interface to
-// report threats back to the host app (VPBankNEO). The reporting pipeline is:
-//   +[ZDefend addDeviceStatusCallback:block] → callback fires → ZDefendManager
-//   → sub_1007E2DB4 → ZDefendViewController shown
+// Two-part fix:
 //
-// Fix: hook +[ZDefend addDeviceStatusCallback:] → swallow (drop the block).
-//   ZDefend detects threats internally (cannot be prevented without kernel patches),
-//   but can never deliver them to VPBankNEO → no ZDefendViewController appears.
+// Fix A — 6-minute background kill (loc_243854 / sub_23F234):
+//   ZDefend spawns ~20 one-shot threads (sub_243744, sub_243864) that nanosleep
+//   ~6 minutes then call loc_243854 → sub_23F234.  sub_23F234 is a 4-instruction
+//   kill function: LDR X30,=0xDD3FB5DCAFF0C584; LDR X0,=0x228E6AD55B8699BC;
+//   EOR X0,X0,X30; BR X0 → jumps to 0xFFB1DF09F4765C38 (PAC-invalid) → SIGSEGV.
+//   Confirmed by VPBankNEO-2026-09-22-002140.ips (PC=0xFFB1DF09F4765C38).
+//   On non-jailbreak devices ZDefend patches the literal-pool constants at runtime
+//   to a valid function pointer; on a jailbreak they remain as-is → crash.
+//   Fix: hook loc_243854 at (ZDefend_base + 0x243854) via pthread_exit(NULL).
+//   Must NOT return: both callers follow "BL loc_243854" with an EH landing pad
+//   (sub_7580 = __Unwind_Resume); a normal return → __Unwind_Resume(garbage) → crash.
+//   pthread_exit terminates only the background thread; the process continues.
+//   Offset is from ZDefend IDA analysis (binary UUID b63632c4, file base 0x0).
+//
+// Fix B — ObjC threat-delivery pipeline:
+//   ZDefend reports threats via +[ZDefend addDeviceStatusCallback:].  Swallow this
+//   to prevent VPBankNEO from receiving any ZDefend threat events.
+//   +[ZDefend setTrackingIds:tag2:] is also swallowed to block Zimperium cloud
+//   registration of this device session.
 //
 // Why safe from _integrity_failed:
-//   MSHookMessageEx modifies the ObjC method dispatch table in __DATA (method_t.imp).
-//   _integrity_failed hashes the __text/__TEXT segment only. Modifying __DATA does
-//   NOT affect the text hash → _integrity_failed does not fire.
-//
-// IDA-confirmed (instance 22ql): _integrity_failed (0x1CEE54) CANNOT crash the process.
-//   Import table: ZDefend.framework imports NO termination API — abort(), exit(),
-//   _exit(), kill(), raise() are all absent. Only ___cxa_guard_abort (C++ init guard),
-//   _objc_sync_exit (@synchronized), and atexit-family registrations appear; none
-//   terminate the process. kill() is completely absent.
-//   _integrity_failed body: CFF state machine calling only sub_1CFA08 (loads two
-//   magic constants into W12/W13, RET — pure obfuscation bookkeeping) and
-//   ___stack_chk_fail (stack canary, unreachable on a clean stack). No crash path.
-//
-// +[ZDefend setTrackingIds:tag2:] is also swallowed to prevent ZDefend from
-// registering this device session on the Zimperium cloud backend.
+//   MSHookMessageEx modifies ObjC method_t.imp in __DATA only; _integrity_failed
+//   hashes __TEXT/__text — __DATA changes don't affect it → _integrity_failed safe.
+//   IDA-confirmed: _integrity_failed (0x1CEE54) calls only sub_1CEFE4 (4-instruction
+//   no-op: STR WZR/LDR/ADRP/RET) and ___stack_chk_fail (unreachable on a clean stack).
+//   Zero direct callers in binary. No crash path.
+//   ZDefend imports no abort/exit/kill/raise; the kill mechanism is internal (Fix A).
+
+// Fix A: loc_243854 wrapper replacement.
+// IMPORTANT: must NOT return normally.
+// The callers (sub_243744 @ 0x243790, sub_243864 @ 0x2438b0) follow
+// "BL loc_243854" with an EH cleanup landing pad:
+//   MOV X19, X0          ; save exception object
+//   MOV X0, SP
+//   BL sub_2437A4        ; run C++ destructors
+//   BL sub_7580          ; sub_7580 = MOV X0,X19; B __Unwind_Resume → re-throw
+// A normal return would land there with X0=garbage → __Unwind_Resume(garbage) → crash.
+// Use pthread_exit(NULL) to terminate the background thread cleanly instead.
+static void __attribute__((noreturn)) replaced_zdefend_kill_wrapper(void) {
+    pthread_exit(NULL);
+}
 
 static void replaced_ZDefend_addDeviceStatusCallback(id cls, SEL sel, id block)
 {
@@ -323,15 +343,40 @@ __attribute__((visibility("default"))) void zdefendBypassInit(void)
 {
     Class zdCls = objc_getClass("ZDefend");
     if (!zdCls) {
-        // ZDefend.framework is not present (not VP Bank) — safe no-op
         RH_LOG("zdefendBypassInit: ZDefend class absent, skipping");
         return;
     }
-    RH_LOG("zdefendBypassInit: ZDefend found, cutting threat reporting pipeline");
+    RH_LOG("zdefendBypassInit: ZDefend found, installing kill-mechanism bypass");
 
-    // Hook +[ZDefend addDeviceStatusCallback:] on the ZDefend metaclass
     Class zdMeta = objc_getMetaClass("ZDefend");
 
+    // Fix A: hook loc_243854 (ZDefend+0x243854) — the kill-wrapper called by
+    // background threads after ~6-minute nanosleep.  Must be done BEFORE
+    // MSHookMessageEx so we dladdr the unmodified original IMP.
+    {
+        IMP zdImp = class_getMethodImplementation(zdMeta,
+                                                  @selector(addDeviceStatusCallback:));
+        if (zdImp) {
+            Dl_info dl;
+            if (dladdr((void *)zdImp, &dl) && dl.dli_fbase) {
+                void *kill_wrapper = (char *)dl.dli_fbase + 0x243854;
+                // First instruction of loc_243854: STP X29, X30, [SP,#-0x10]! = 0xA9BF7BFD
+                uint32_t first_insn = *(uint32_t *)kill_wrapper;
+                if (first_insn == 0xA9BF7BFDU) {
+                    MSHookFunction(kill_wrapper,
+                                   (void *)replaced_zdefend_kill_wrapper,
+                                   NULL);
+                    RH_LOG("zdefendBypassInit: loc_243854 kill-wrapper hooked at %p",
+                           kill_wrapper);
+                } else {
+                    RH_LOG("zdefendBypassInit: loc_243854 insn=0x%08x mismatch, skip",
+                           first_insn);
+                }
+            }
+        }
+    }
+
+    // Fix B: swallow ObjC threat-delivery and cloud-registration calls.
     MSHookMessageEx(zdMeta,
                     @selector(addDeviceStatusCallback:),
                     (IMP)replaced_ZDefend_addDeviceStatusCallback,
