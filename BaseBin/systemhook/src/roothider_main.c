@@ -762,10 +762,7 @@ static unsigned int gBSDPMRHideClassCount = 0;
 
 static void save_canary_imps(void) {
     Class cls = objc_getClass("BSDPMRHide");
-    if (!cls) {
-        RH_LOG("save_canary_imps: BSDPMRHide absent, skipping");
-        return;
-    }
+    if (!cls) return;
     RH_LOG("save_canary_imps: BSDPMRHide found, saving IMPs");
 
     Method *inst = class_copyMethodList(cls, &gBSDPMRHideInstCount);
