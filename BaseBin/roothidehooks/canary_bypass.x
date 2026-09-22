@@ -5,8 +5,12 @@
 #include <stdio.h>
 #include <stdarg.h>
 
-// Diagnostic logger for Apple Unified Logging (idevicesyslog / log stream)
-// Uses OS_LOG_TYPE_DEFAULT (<Notice>) with %{public}s to prevent <private> redaction
+// RHHIDE_DEBUG: define at compile time (-DRHHIDE_DEBUG) to enable OS-log diagnostics.
+// Production builds must NOT define it: RASP tools (ZDefend, BlueShield) call
+// +[OSLogStore localStoreAndReturnError:] to read the app process's own log entries.
+// Any [RHHIDE] message in the log reveals that a bypass is active, triggering
+// ZDefend's background kill mechanism at ZDefend+0x2437D4 (~6 min after launch).
+#ifdef RHHIDE_DEBUG
 static inline void rh_log(const char *fmt, ...) {
     char buf[2048];
     va_list ap;
@@ -16,6 +20,9 @@ static inline void rh_log(const char *fmt, ...) {
     os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "[RHHIDE] %{public}s", buf);
 }
 #define RH_LOG(fmt, ...) rh_log(fmt, ##__VA_ARGS__)
+#else
+#define RH_LOG(fmt, ...) ((void)0)
+#endif
 
 // BSDPMRHide (0x80600 in blueshield.framework) is a canary/honeypot ObjC class
 // designed by Singalarity BlueShield to detect ObjC hook frameworks
@@ -378,59 +385,69 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
     // find no rebound pointers and report clean. No bypass needed.
 
     // ── Hook +[OSLogStore localStoreAndReturnError:] → nil: disables BSLogCek ─
+    // Uses method_setImplementation directly instead of MSHookMessageEx.
+    // Root cause of prior failure: iOS 15 system frameworks use compact/relative
+    // method encoding; MSHookMessageEx cannot extract the original IMP from a
+    // relative method list and returns orig=NULL without installing the hook.
+    // method_setImplementation is the ObjC runtime's PAC-aware IMP replacement
+    // function and handles relative method encoding correctly on arm64e iOS 15+.
     Class osLogStoreMeta = objc_getMetaClass("OSLogStore");
-    RH_LOG("OSLogStore metaclass=%p", osLogStoreMeta);
     if (osLogStoreMeta) {
         Method m_ols = class_getInstanceMethod(osLogStoreMeta,
                                                @selector(localStoreAndReturnError:));
-        MSHookMessageEx(osLogStoreMeta,
-                        @selector(localStoreAndReturnError:),
-                        (IMP)replaced_localStoreAndReturnError,
-                        (IMP *)&orig_localStoreAndReturnError);
-        rh_record_method(m_ols, (IMP)orig_localStoreAndReturnError);
-        RH_LOG("OSLogStore.localStoreAndReturnError hooked, orig=%p", (void *)orig_localStoreAndReturnError);
+        if (m_ols) {
+            IMP oldOlsImp = method_setImplementation(m_ols, (IMP)replaced_localStoreAndReturnError);
+            orig_localStoreAndReturnError = (__typeof__(orig_localStoreAndReturnError))oldOlsImp;
+            rh_record_method(m_ols, oldOlsImp);
+        }
     }
 
     // ── Hook NSFileManager file-existence checks ──────────────────────────────
-    // Covers BSZInspection Zebra/Zim scan and cekL3Int package metadata reads.
-    {
-        Method m_fep = class_getInstanceMethod([NSFileManager class],
-                                               @selector(fileExistsAtPath:));
-        MSHookMessageEx([NSFileManager class],
-                        @selector(fileExistsAtPath:),
-                        (IMP)replaced_fileExistsAtPath,
-                        (IMP *)&orig_fileExistsAtPath);
-        rh_record_method(m_fep, (IMP)orig_fileExistsAtPath);
-        RH_LOG("NSFileManager.fileExistsAtPath: hooked, orig=%p", (void *)orig_fileExistsAtPath);
+    // MBV Bank (no ZDefend) only. Two reasons to skip when ZDefend is present (VPBank):
+    //
+    // 1. ZDefend uses direct SVC syscalls (openat/stat64/readlinkat via SVC 0x80),
+    //    bypassing NSFileManager entirely. The hooks provide zero protection.
+    //
+    // 2. When ZDefend is present, method_getImplementation is NOT hooked (PAC safety —
+    //    see comment above). BlueShield's RuntimeHookChecker in VPBank would call
+    //    method_getImplementation on NSFileManager methods and see our replaced IMP
+    //    pointing into roothidehooks.dylib (outside any system-framework __TEXT range),
+    //    detecting the hook. Without method_getImplementation intercepted, hooking
+    //    NSFileManager creates a detection surface with no benefit.
+    //
+    // On Dopamine roothide the paths BSZInspection checks (/var/jb/, dpkg, Cydia, etc.)
+    // do not exist regardless, so these hooks never block anything in practice for
+    // either app; their purpose is solely to satisfy RuntimeHookChecker for MBV Bank.
+    if (objc_getClass("ZDefend") == NULL) {
+        {
+            Method m_fep = class_getInstanceMethod([NSFileManager class],
+                                                   @selector(fileExistsAtPath:));
+            MSHookMessageEx([NSFileManager class],
+                            @selector(fileExistsAtPath:),
+                            (IMP)replaced_fileExistsAtPath,
+                            (IMP *)&orig_fileExistsAtPath);
+            rh_record_method(m_fep, (IMP)orig_fileExistsAtPath);
+        }
+        {
+            Method m_fepid = class_getInstanceMethod([NSFileManager class],
+                                                     @selector(fileExistsAtPath:isDirectory:));
+            MSHookMessageEx([NSFileManager class],
+                            @selector(fileExistsAtPath:isDirectory:),
+                            (IMP)replaced_fileExistsAtPathIsDirectory,
+                            (IMP *)&orig_fileExistsAtPathIsDirectory);
+            rh_record_method(m_fepid, (IMP)orig_fileExistsAtPathIsDirectory);
+        }
+        // Defensive: +[MC1 getAllFramworks] (0x20394) calls contentsOfDirectoryAtPath:
+        // to list the app's /Frameworks dir. Jailbreak dylibs are NOT in /Frameworks
+        // (injected via DYLD_INSERT_LIBRARIES), so this filters nothing in practice.
+        {
+            Method m_coddap = class_getInstanceMethod([NSFileManager class],
+                                                      @selector(contentsOfDirectoryAtPath:error:));
+            MSHookMessageEx([NSFileManager class],
+                            @selector(contentsOfDirectoryAtPath:error:),
+                            (IMP)replaced_contentsOfDirectoryAtPath,
+                            (IMP *)&orig_contentsOfDirectoryAtPath);
+            rh_record_method(m_coddap, (IMP)orig_contentsOfDirectoryAtPath);
+        }
     }
-    {
-        Method m_fepid = class_getInstanceMethod([NSFileManager class],
-                                                 @selector(fileExistsAtPath:isDirectory:));
-        MSHookMessageEx([NSFileManager class],
-                        @selector(fileExistsAtPath:isDirectory:),
-                        (IMP)replaced_fileExistsAtPathIsDirectory,
-                        (IMP *)&orig_fileExistsAtPathIsDirectory);
-        rh_record_method(m_fepid, (IMP)orig_fileExistsAtPathIsDirectory);
-        RH_LOG("NSFileManager.fileExistsAtPath:isDirectory: hooked, orig=%p",
-               (void *)orig_fileExistsAtPathIsDirectory);
-    }
-
-    // ── Hook NSFileManager contentsOfDirectoryAtPath:error: ──────────────────
-    // Defensive: +[MC1 getAllFramworks] (0x20394) calls this to list the app's
-    // /Frameworks directory after detection. Jailbreak dylibs are NOT in the
-    // Frameworks dir (injected via DYLD_INSERT_LIBRARIES), so this will not
-    // filter anything in practice. Recorded for RuntimeHookChecker bypass.
-    {
-        Method m_coddap = class_getInstanceMethod([NSFileManager class],
-                                                  @selector(contentsOfDirectoryAtPath:error:));
-        MSHookMessageEx([NSFileManager class],
-                        @selector(contentsOfDirectoryAtPath:error:),
-                        (IMP)replaced_contentsOfDirectoryAtPath,
-                        (IMP *)&orig_contentsOfDirectoryAtPath);
-        rh_record_method(m_coddap, (IMP)orig_contentsOfDirectoryAtPath);
-        RH_LOG("NSFileManager.contentsOfDirectoryAtPath:error: hooked, orig=%p",
-               (void *)orig_contentsOfDirectoryAtPath);
-    }
-
-    RH_LOG("logScanBypassInit complete, recorded %d methods", s_rh_method_count);
 }

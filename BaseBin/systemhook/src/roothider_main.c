@@ -14,8 +14,12 @@
 #include <stdarg.h>
 #include <os/log.h>
 
-// Diagnostic logger for Apple Unified Logging (idevicesyslog / log stream)
-// Uses OS_LOG_TYPE_DEFAULT (<Notice>) with %{public}s to prevent <private> redaction
+// RHHIDE_DEBUG: define at compile time (-DRHHIDE_DEBUG) to enable OS-log diagnostics.
+// Production builds must NOT define it: RASP tools (ZDefend, BlueShield) call
+// +[OSLogStore localStoreAndReturnError:] to read the app process's own log entries.
+// Any [RHHIDE] message in the log reveals that a bypass is active, triggering
+// ZDefend's background kill mechanism at ZDefend+0x2437D4 (~6 min after launch).
+#ifdef RHHIDE_DEBUG
 static inline void rh_log(const char *fmt, ...) {
     char buf[2048];
     va_list ap;
@@ -25,6 +29,9 @@ static inline void rh_log(const char *fmt, ...) {
     os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "[RHHIDE] %{public}s", buf);
 }
 #define RH_LOG(fmt, ...) rh_log(fmt, ##__VA_ARGS__)
+#else
+#define RH_LOG(fmt, ...) ((void)0)
+#endif
 
 #include <litehook.h>
 
