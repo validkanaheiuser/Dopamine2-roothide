@@ -762,7 +762,11 @@ static unsigned int gBSDPMRHideClassCount = 0;
 
 static void save_canary_imps(void) {
     Class cls = objc_getClass("BSDPMRHide");
-    if (!cls) return;  // Not the banking app; blueshield.framework not present.
+    if (!cls) {
+        RH_LOG("save_canary_imps: BSDPMRHide absent, skipping");
+        return;
+    }
+    RH_LOG("save_canary_imps: BSDPMRHide found, saving IMPs");
 
     Method *inst = class_copyMethodList(cls, &gBSDPMRHideInstCount);
     if (inst) {
@@ -788,6 +792,8 @@ static void save_canary_imps(void) {
         }
         free(cls_m);
     }
+    RH_LOG("save_canary_imps: saved inst=%u class=%u",
+           gBSDPMRHideInstCount, gBSDPMRHideClassCount);
 }
 
 static void restore_canary_imps(void) {
@@ -801,6 +807,8 @@ static void restore_canary_imps(void) {
             method_setImplementation(gBSDPMRHideClassIMPs[i].method,
                                      gBSDPMRHideClassIMPs[i].origIMP);
     }
+    RH_LOG("restore_canary_imps: restored inst=%u class=%u",
+           gBSDPMRHideInstCount, gBSDPMRHideClassCount);
 }
 
 //export for PatchLoader
@@ -1288,6 +1296,26 @@ void roothide_init_with_checkin(const char* rootdir)
 	dlopen(JBROOT_PATH("/usr/lib/roothideinit.dylib"), RTLD_NOW);
 }
 
+// One-shot snapshot: enumerate all currently-loaded dyld images and log which
+// ones is_jailbreak_image() would filter. Called once at bypass activation time
+// (after roothidehooks.dylib is dlopen'd so CydiaSubstrate is also loaded).
+// Output verifies that /.jbroot- fix (commit 9e464a5) correctly hides
+// CydiaSubstrate and other jailbreak dylibs from MC1 isFrameworkAvailable.
+static void log_hidden_images(void) {
+    const struct dyld_all_image_infos *infos = get_image_infos();
+    if (!infos) { RH_LOG("log_hidden_images: no image infos"); return; }
+    uint32_t hidden = 0;
+    for (uint32_t i = 0; i < infos->infoArrayCount; i++) {
+        const char *p = infos->infoArray[i].imageFilePath;
+        if (is_jailbreak_image(p)) {
+            hidden++;
+            RH_LOG("HIDDEN img[%u]: %s", i, p ?: "(null)");
+        }
+    }
+    RH_LOG("dyld filter snapshot: total=%u visible=%u hidden=%u",
+           infos->infoArrayCount, infos->infoArrayCount - hidden, hidden);
+}
+
 void roothide_init_with_executable(const char* executable)
 {
 	if (__builtin_available(iOS 16.0, *))
@@ -1376,6 +1404,8 @@ void roothide_init_with_executable(const char* executable)
 			void (*zdefendBypassInit)(void) = dlsym(rhhooks, "zdefendBypassInit");
 			RH_LOG("zdefendBypassInit=%p", zdefendBypassInit);
 			if (zdefendBypassInit) zdefendBypassInit();
+
+			log_hidden_images();
 		}
 		RH_LOG("bypass init complete");
 	}

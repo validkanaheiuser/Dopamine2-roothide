@@ -50,7 +50,10 @@ static Method (*orig_class_getInstanceMethod)(Class cls, SEL sel) = NULL;
 
 static Method replaced_class_getInstanceMethod(Class cls, SEL sel)
 {
-	if (cls && strcmp(class_getName(cls), "BSDPMRHide") == 0) return NULL;
+	if (cls && strcmp(class_getName(cls), "BSDPMRHide") == 0) {
+		RH_LOG("canary: blocked class_getInstanceMethod(BSDPMRHide, %s)", sel_getName(sel));
+		return NULL;
+	}
 	return orig_class_getInstanceMethod(cls, sel);
 }
 
@@ -58,18 +61,30 @@ static Method (*orig_class_getClassMethod)(Class cls, SEL sel) = NULL;
 
 static Method replaced_class_getClassMethod(Class cls, SEL sel)
 {
-	if (cls && strcmp(class_getName(cls), "BSDPMRHide") == 0) return NULL;
+	if (cls && strcmp(class_getName(cls), "BSDPMRHide") == 0) {
+		RH_LOG("canary: blocked class_getClassMethod(BSDPMRHide, %s)", sel_getName(sel));
+		return NULL;
+	}
 	return orig_class_getClassMethod(cls, sel);
 }
 
 __attribute__((visibility("default"))) void canaryBypassInit(void)
 {
+	Class bsdCls = objc_getClass("BSDPMRHide");
+	RH_LOG("canaryBypassInit: BSDPMRHide=%p (%s)",
+	       bsdCls, bsdCls ? "present (MBV Bank)" : "absent");
+
 	MSHookFunction((void *)class_getInstanceMethod,
 	               (void *)replaced_class_getInstanceMethod,
 	               (void **)&orig_class_getInstanceMethod);
+	RH_LOG("canaryBypassInit: class_getInstanceMethod hooked orig=%p",
+	       (void *)orig_class_getInstanceMethod);
+
 	MSHookFunction((void *)class_getClassMethod,
 	               (void *)replaced_class_getClassMethod,
 	               (void **)&orig_class_getClassMethod);
+	RH_LOG("canaryBypassInit: class_getClassMethod hooked orig=%p",
+	       (void *)orig_class_getClassMethod);
 }
 
 // ─── RuntimeHookChecker bypass: method_getImplementation intercept ────────────
@@ -119,6 +134,8 @@ static IMP replaced_method_getImplementation(Method m) {
     if (m) {
         for (int i = 0; i < s_rh_method_count; i++) {
             if (s_rh_methods[i] == m) {
+                RH_LOG("RuntimeHookChecker: spoofed imp[%d] orig=%p",
+                       i, (void *)s_rh_orig_imps[i]);
                 return s_rh_orig_imps[i];
             }
         }
