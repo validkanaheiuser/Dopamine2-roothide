@@ -106,11 +106,12 @@ __attribute__((visibility("default"))) void canaryBypassInit(void)
 // recognised system framework. Any IMP pointing outside those ranges (e.g. into
 // roothidehooks.dylib) triggers reason=5.
 //
-// We hook via MSHookMessageEx:
+// We hook via MSHookMessageEx / method_setImplementation:
 //   +[OSLogStore localStoreAndReturnError:]  → replaced_localStoreAndReturnError
 //   -[NSFileManager fileExistsAtPath:]       → replaced_fileExistsAtPath
 //   -[NSFileManager fileExistsAtPath:isDirectory:] → replaced_fileExistsAtPathIsDirectory
 //   -[NSFileManager contentsOfDirectoryAtPath:error:] → replaced_contentsOfDirectoryAtPath
+//   -[UIApplication canOpenURL:]             → replaced_canOpenURL
 //
 // After each MSHookMessageEx the method table entry has our IMP. When
 // RuntimeHookChecker calls method_getImplementation(m) for those methods it
@@ -211,6 +212,29 @@ static bool jailbreakBypassShouldBlockPath(NSString *path) {
     if (!cpath) return false;
     for (int i = 0; kJailbreakPathPatterns[i]; i++) {
         if (strstr(cpath, kJailbreakPathPatterns[i])) return true;
+    }
+    return false;
+}
+
+static const char *const kJailbreakURLSchemes[] = {
+    "cydia",       // Cydia package manager
+    "sileo",       // Sileo package manager
+    "zbra",        // Zebra package manager
+    "filza",       // Filza file manager
+    "apt",         // apt scheme
+    "dpkg",        // dpkg scheme
+    "undecimus",   // unc0ver
+    NULL
+};
+
+static bool jailbreakBypassShouldBlockURL(NSURL *url) {
+    if (!url) return false;
+    NSString *scheme = [url scheme];
+    if (!scheme) return false;
+    const char *cscheme = [scheme UTF8String];
+    if (!cscheme) return false;
+    for (int i = 0; kJailbreakURLSchemes[i]; i++) {
+        if (strcasecmp(cscheme, kJailbreakURLSchemes[i]) == 0) return true;
     }
     return false;
 }
@@ -392,6 +416,34 @@ __attribute__((visibility("default"))) void zdefendBypassInit(void)
     RH_LOG("zdefendBypassInit: setTrackingIds:tag2: hooked");
 }
 
+// ─── BSHasApp cekL1Int: URL scheme detection bypass ──────────────────────────
+//
+// cekL1Int (0x31E6C, blueshield.framework r82q) iterates a "schemes" array from
+// the BlueShield check config and calls:
+//   [[UIApplication sharedApplication] canOpenURL:[NSURL URLWithString:scheme]]
+// If any scheme returns YES → W19=1 → reason=4.
+//
+// IDA-confirmed (r82q, W8=0x757E solved from count constraint "UIApplication"=4):
+//   0x32374 → "UIApplication"   0x3239c → "sharedApplication"
+//   0x323d8 → "canOpenURL:"     0x32400 → "NSURL"
+//   0x32424 → "URLWithString:"
+//   0x32470: TBNZ W24, #0, loc_324A4 → detected if canOpenURL: returned YES
+//
+// Fix: return NO for known jailbreak tool URL schemes (cydia://, sileo://, etc.)
+// Uses method_setImplementation (PAC-aware, handles compact method encoding on
+// iOS 15+ UIKit) — same approach as localStoreAndReturnError: hook above.
+// RuntimeHookChecker bypass: recorded via rh_record_method (slot 5/8).
+
+static BOOL (*orig_canOpenURL)(id self, SEL sel, NSURL *url) = NULL;
+
+static BOOL replaced_canOpenURL(id self, SEL sel, NSURL *url) {
+    if (jailbreakBypassShouldBlockURL(url)) {
+        RH_LOG("UIApp.canOpenURL BLOCKED: %s", [[url absoluteString] UTF8String] ?: "");
+        return NO;
+    }
+    return orig_canOpenURL(self, sel, url);
+}
+
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
     RH_LOG("logScanBypassInit called");
@@ -495,6 +547,21 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                             (IMP)replaced_contentsOfDirectoryAtPath,
                             (IMP *)&orig_contentsOfDirectoryAtPath);
             rh_record_method(m_coddap, (IMP)orig_contentsOfDirectoryAtPath);
+        }
+        // ── Hook UIApplication canOpenURL: → NO for jailbreak tool schemes ───────
+        // BSHasApp cekL1Int (blueshield.framework 0x31E6C) queries whether schemes
+        // like sileo://, cydia://, zbra:// can be opened to detect jailbreak package
+        // managers. method_setImplementation handles compact method encoding on UIKit.
+        {
+            Class uiAppCls = objc_getClass("UIApplication");
+            if (uiAppCls) {
+                Method m_cou = class_getInstanceMethod(uiAppCls, @selector(canOpenURL:));
+                if (m_cou) {
+                    IMP oldCouImp = method_setImplementation(m_cou, (IMP)replaced_canOpenURL);
+                    orig_canOpenURL = (__typeof__(orig_canOpenURL))oldCouImp;
+                    rh_record_method(m_cou, oldCouImp);
+                }
+            }
         }
     }
 }
