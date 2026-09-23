@@ -550,15 +550,19 @@ static bool is_jailbreak_image(const char *path) {
 
 // Maps a caller's "visible" index (jailbreak images excluded) to the real
 // infoArray index. Returns UINT32_MAX when vis is out of the visible range.
-// Correctness: scans left-to-right counting non-jailbreak images as v=0,1,...
-// For vis ∈ [0, M-1] (M = hook__dyld_image_count()), always finds the entry →
-// valid real index returned. For vis ≥ M → UINT32_MAX sentinel. All callers
-// check (r != UINT32_MAX) before use. See correctness proof in the audit block.
-static uint32_t visible_to_real_idx(const struct dyld_all_image_infos *infos,
+// Takes a pre-snapshotted (arr, count) pair so the caller controls when
+// infoArray is read from the live dyld_all_image_infos struct. Callers must
+// snapshot arr = infos->infoArray and count = infos->infoArrayCount before
+// calling, and NULL-check arr, to avoid a TOCTOU race with dyld reallocating
+// infoArray between iterations (observed crash: FAR=0x770/0x210 SIGSEGV when
+// AdjustSigSdk/Firebase called _dyld_get_image_name concurrently with a new
+// image load, causing arr to become NULL mid-loop).
+static uint32_t visible_to_real_idx(const struct dyld_image_info *arr,
+                                    uint32_t count,
                                     uint32_t vis) {
     uint32_t v = 0;
-    for (uint32_t r = 0; r < infos->infoArrayCount; r++) {
-        if (is_jailbreak_image(infos->infoArray[r].imageFilePath)) continue;
+    for (uint32_t r = 0; r < count; r++) {
+        if (is_jailbreak_image(arr[r].imageFilePath)) continue;
         if (v == vis) return r;
         v++;
     }
@@ -568,34 +572,39 @@ static uint32_t visible_to_real_idx(const struct dyld_all_image_infos *infos,
 static uint32_t hook__dyld_image_count(void) {
     const struct dyld_all_image_infos *infos = get_image_infos();
     if (!infos) return 0;
-    if (!gShouldHideJailbreak) return infos->infoArrayCount;
+    const struct dyld_image_info *arr = infos->infoArray;
+    uint32_t count = infos->infoArrayCount;
+    if (!arr) return 0;
+    if (!gShouldHideJailbreak) return count;
     uint32_t n = 0;
-    for (uint32_t i = 0; i < infos->infoArrayCount; i++)
-        if (!is_jailbreak_image(infos->infoArray[i].imageFilePath)) n++;
+    for (uint32_t i = 0; i < count; i++)
+        if (!is_jailbreak_image(arr[i].imageFilePath)) n++;
     return n;
 }
 
 static const char *hook__dyld_get_image_name(uint32_t idx) {
     const struct dyld_all_image_infos *infos = get_image_infos();
     if (!infos) return NULL;
-    if (!gShouldHideJailbreak) {
-        return (idx < infos->infoArrayCount) ? infos->infoArray[idx].imageFilePath : NULL;
-    }
-    uint32_t r = visible_to_real_idx(infos, idx);
-    return (r != UINT32_MAX) ? infos->infoArray[r].imageFilePath : NULL;
+    const struct dyld_image_info *arr = infos->infoArray;
+    uint32_t count = infos->infoArrayCount;
+    if (!arr) return NULL;
+    if (!gShouldHideJailbreak)
+        return (idx < count) ? arr[idx].imageFilePath : NULL;
+    uint32_t r = visible_to_real_idx(arr, count, idx);
+    return (r != UINT32_MAX) ? arr[r].imageFilePath : NULL;
 }
 
 static const struct mach_header *hook__dyld_get_image_header(uint32_t idx) {
     const struct dyld_all_image_infos *infos = get_image_infos();
     if (!infos) return NULL;
-    if (!gShouldHideJailbreak) {
-        return (idx < infos->infoArrayCount)
-               ? (const struct mach_header *)infos->infoArray[idx].imageLoadAddress
-               : NULL;
-    }
-    uint32_t r = visible_to_real_idx(infos, idx);
+    const struct dyld_image_info *arr = infos->infoArray;
+    uint32_t count = infos->infoArrayCount;
+    if (!arr) return NULL;
+    if (!gShouldHideJailbreak)
+        return (idx < count) ? (const struct mach_header *)arr[idx].imageLoadAddress : NULL;
+    uint32_t r = visible_to_real_idx(arr, count, idx);
     return (r != UINT32_MAX)
-           ? (const struct mach_header *)infos->infoArray[r].imageLoadAddress
+           ? (const struct mach_header *)arr[r].imageLoadAddress
            : NULL;
 }
 
@@ -644,10 +653,13 @@ static const struct dyld_all_image_infos *hook__dyld_get_all_image_infos(void) {
     if (!infos) return NULL;
     if (!gShouldHideJailbreak) return infos;
 
+    const struct dyld_image_info *arr = infos->infoArray;
+    uint32_t count = infos->infoArrayCount;
+    if (!arr) return NULL;
     uint32_t n = 0;
-    for (uint32_t i = 0; i < infos->infoArrayCount && n < MAX_FILTERED_IMAGES; i++) {
-        if (!is_jailbreak_image(infos->infoArray[i].imageFilePath))
-            g_filtered_image_array[n++] = infos->infoArray[i];
+    for (uint32_t i = 0; i < count && n < MAX_FILTERED_IMAGES; i++) {
+        if (!is_jailbreak_image(arr[i].imageFilePath))
+            g_filtered_image_array[n++] = arr[i];
     }
     g_filtered_image_infos            = *infos;
     g_filtered_image_infos.infoArray      = g_filtered_image_array;
