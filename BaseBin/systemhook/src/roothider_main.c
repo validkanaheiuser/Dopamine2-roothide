@@ -446,20 +446,28 @@ static const char *const kBlockedPathPatterns[] = {
 
 static int hook_access(const char *path, int mode) {
     if (gShouldHideJailbreak && path) {
-        // Exact-match block (Fix A — IOSSecuritySuite bind-mounted dylib checks).
-        for (int i = 0; kBlockedAccessPaths[i]; i++) {
-            if (strcmp(path, kBlockedAccessPaths[i]) == 0) {
-                RH_LOG("access BLOCKED(exact): %s", path);
-                errno = ENOENT;
-                return -1;
+        // Pass through access() calls from jailbreak dylibs (e.g., Crane, TweakLoader).
+        // They live at .jbroot- paths; RASP SDKs live at app/system paths.
+        Dl_info callerInfo;
+        bool callerIsJBDylib = (dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
+                                callerInfo.dli_fname != NULL &&
+                                strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
+        if (!callerIsJBDylib) {
+            // Exact-match block (Fix A — IOSSecuritySuite bind-mounted dylib checks).
+            for (int i = 0; kBlockedAccessPaths[i]; i++) {
+                if (strcmp(path, kBlockedAccessPaths[i]) == 0) {
+                    RH_LOG("access BLOCKED(exact): %s", path);
+                    errno = ENOENT;
+                    return -1;
+                }
             }
-        }
-        // Substring-match block (BSZInspection, cekL3Int — broader jailbreak paths).
-        for (int i = 0; kBlockedPathPatterns[i]; i++) {
-            if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
-                RH_LOG("access BLOCKED(pattern=%s): %s", kBlockedPathPatterns[i], path);
-                errno = ENOENT;
-                return -1;
+            // Substring-match block (BSZInspection, cekL3Int — broader jailbreak paths).
+            for (int i = 0; kBlockedPathPatterns[i]; i++) {
+                if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
+                    RH_LOG("access BLOCKED(pattern=%s): %s", kBlockedPathPatterns[i], path);
+                    errno = ENOENT;
+                    return -1;
+                }
             }
         }
     }
