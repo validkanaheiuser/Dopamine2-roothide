@@ -361,14 +361,22 @@ static inline void rh_log(const char *fmt, ...) {
 // │   STATUS: NOT RELEVANT — these trigger on user actions (screenshot/AirPlay),
 // │   not on jailbreak presence. Not addressable via systemhook.
 // ├──────────────────────────────────────────────────────────────────────────────
-// │ reason=4 (Injected Library): MWkpr.doWkpr (0x6ae0), dyld scan.
+// │ reason=4: TWO SEPARATE DETECTION SOURCES
 // │
-// │   STATUS: COVERED by Fix B (dyld image-list hooks) + is_jailbreak_image()
-// │   extension below. MWkpr calls _dyld_image_count/_dyld_get_image_name to
-// │   enumerate loaded dylibs and checks for /Library/MobileSubstrate/ and
-// │   /usr/lib/TweakInject/ prefixes. Fix B filters all images for which
-// │   is_jailbreak_image() returns true. is_jailbreak_image() is extended here
-// │   to include both explicit paths from DOPAMINE_WEAKNESS_2.md.
+// │ [BlueShield] MWkpr.doWkpr (0x6ae0): dyld scan for injected libs.
+// │   STATUS: COVERED by Fix B (_dyld_image_count/_dyld_get_image_name hooks +
+// │   is_jailbreak_image filter).
+// │
+// │ [MBRaspSdk] ThreatType.hackingTools (rawValue=4), sub_E808 (18ed IDA).
+// │   11 check types [0..10] in __data. Active handlers: type 6 (sub_DE1C) and
+// │   type 8 (sub_E600). Types 1 (FishHook file check) and 7 (TCP probe) are
+// │   inactive — non-hex chars in ciphertext / connect to INADDR_NONE.
+// │   Type 6: _dyld_image_count/_dyld_get_image_name scan for "frida"/"cynject"/
+// │   "FridaGadget" — COVERED by Fix B.
+// │   Type 8: sysctl({CTL_KERN,KERN_PROC,KERN_PROC_PID,pid},4) reads kinfo_proc,
+// │   checks kp_proc.p_flag & P_SELECT (0x40) at buf+0x20. P_SELECT is set while
+// │   a thread is in select() — COVERED by __sysctl_hook KERN_PROC_PID intercept
+// │   in roothider_common.c (clears bit 0x40 after the real sysctl call).
 // ├──────────────────────────────────────────────────────────────────────────────
 // │ reason=5 (Hooking): MC1/BSDPMRHide. ALREADY FIXED — see DOPAMINE_WEAKNESS.md
 // │   audit block above.

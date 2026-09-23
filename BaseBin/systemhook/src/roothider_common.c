@@ -160,6 +160,21 @@ int __sysctl_hook(int *name, u_int namelen, void *oldp, size_t *oldlenp, const v
 		}
 	}
 
+	// MBRaspSdk sub_E600 (type 8): sysctl({CTL_KERN,KERN_PROC,KERN_PROC_PID,pid},4)
+	// reads kinfo_proc then checks kp_proc.p_flag & P_SELECT (0x40) at buf+0x20.
+	// P_SELECT is set transiently while any thread is in select(); clear it so the
+	// check always returns clean.
+	if(name && namelen == 4 &&
+	   name[0] == CTL_KERN &&
+	   name[1] == KERN_PROC &&
+	   name[2] == KERN_PROC_PID) {
+		int ret = syscall__sysctl(name, namelen, oldp, oldlenp, newp, newlen);
+		if(ret == 0 && oldp && oldlenp && *oldlenp >= (size_t)(0x20 + sizeof(int))) {
+			*(int *)((char *)oldp + 0x20) &= ~0x40;  /* clear P_SELECT from kp_proc.p_flag */
+		}
+		return ret;
+	}
+
 	return syscall__sysctl(name,namelen,oldp,oldlenp,newp,newlen);
 }
 
