@@ -79,6 +79,35 @@ jobs:
           mv ./Application/Dopamine.tipa  "./Application/roothide-Dopamine-${VERSION}.tipa"
           echo "version=${VERSION}" >> $GITHUB_ENV
 
+      - name: Build Debug TIPA
+        run: |
+          set -x
+          export BASEDIR="$(pwd)"
+          VERSION="${{ env.version }}"
+
+          # Swap in debug dylibs
+          cp BaseBin/.build/roothidehooks-debug.dylib BaseBin/.build/roothidehooks.dylib
+          cp BaseBin/.build/systemhook-debug.dylib BaseBin/.build/systemhook.dylib
+
+          # Rebuild basebin trustcache with updated CDHashes
+          cd BaseBin
+          trustcache create .build/basebin.tc .build
+          cp .build/basebin.tc basebin.tc
+
+          # Rebuild basebin.tar
+          find ./.build -name ".DS_Store" -delete
+          DYLD_FALLBACK_LIBRARY_PATH="." ./tar --transform "s/^.build/basebin/" -cvf "basebin.tar" ".build" --owner=0 --group=0
+          cd ..
+
+          # Inject debug basebin.tar into production tipa
+          mkdir debug-payload
+          unzip "Application/roothide-Dopamine-${VERSION}.tipa" -d debug-payload
+          cp BaseBin/basebin.tar "debug-payload/Payload/Dopamine.app/basebin.tar"
+          cd debug-payload
+          zip -Ar "${BASEDIR}/Application/roothide-Dopamine-${VERSION}-debug.tipa" .
+          cd ..
+          rm -rf debug-payload
+
       - name: Upload Artifact
         id: dopamine-latest-upload
         uses: actions/upload-artifact@v4
@@ -87,10 +116,9 @@ jobs:
           path: |
             ${{ github.workspace }}/Application/roothide-Dopamine-${{ env.version }}.tipa
 
-      - name: Upload Debug Dylibs
+      - name: Upload Debug TIPA
         uses: actions/upload-artifact@v4
         with:
-          name: debug-dylibs-${{ env.version }}
+          name: roothide-Dopamine-${{ env.version }}-debug.tipa
           path: |
-            ${{ github.workspace }}/BaseBin/.build/roothidehooks-debug.dylib
-            ${{ github.workspace }}/BaseBin/.build/systemhook-debug.dylib
+            ${{ github.workspace }}/Application/roothide-Dopamine-${{ env.version }}-debug.tipa
