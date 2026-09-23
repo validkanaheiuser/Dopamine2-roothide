@@ -79,9 +79,11 @@ static Method replaced_class_getClassMethod(Class cls, SEL sel)
 
 __attribute__((visibility("default"))) void canaryBypassInit(void)
 {
+#ifdef RHHIDE_DEBUG
 	Class bsdCls = objc_getClass("BSDPMRHide");
 	RH_LOG("canaryBypassInit: BSDPMRHide=%p (%s)",
 	       bsdCls, bsdCls ? "present (MBV Bank)" : "absent");
+#endif
 
 	MSHookFunction((void *)class_getInstanceMethod,
 	               (void *)replaced_class_getInstanceMethod,
