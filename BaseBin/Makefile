@@ -41,6 +41,8 @@ libjailbreak: .build .include ChOma
 systemhook: .build .include libjailbreak
 	$(MAKE) -C systemhook
 	@cp systemhook/systemhook.dylib .build
+	$(MAKE) -C systemhook RHHIDE_DEBUG=1
+	@cp systemhook/systemhook.dylib .build/systemhook-debug.dylib
 
 forkfix: .build .include libjailbreak systemhook
 	$(MAKE) -C forkfix
@@ -69,6 +71,8 @@ watchdoghook: .build .include libjailbreak
 roothidehooks: .build .include libjailbreak
 	$(MAKE) -C roothidehooks
 	@cp roothidehooks/.theos/obj/roothidehooks.dylib .build
+	$(MAKE) -C roothidehooks RHHIDE_DEBUG=1 THEOS_BUILD_DIR=.theos-debug
+	@cp roothidehooks/.theos-debug/obj/roothidehooks.dylib .build/roothidehooks-debug.dylib
 
 bootstrapper: .build .include libjailbreak
 	$(MAKE) -C bootstrapper
@@ -120,6 +124,7 @@ clean:
 	@$(MAKE) -C idownloadd $@
 	@$(MAKE) -C watchdoghook $@
 	@$(MAKE) -C roothidehooks $@
+	@rm -rf roothidehooks/.theos-debug
 	@$(MAKE) -C bootstrapper $@
 	@$(MAKE) -C jailbreakd $@
 	@$(MAKE) -C dyldhook $@
