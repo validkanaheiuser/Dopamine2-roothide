@@ -506,21 +506,32 @@ static int hook_access(const char *path, int mode) {
 
 // ─── reason=0 cekL2Int: fork() detection bypass ──────────────────────────────
 //
-// BSHasApp.cekL2Int (0x324d4 in blueshield.framework, DOPAMINE_WEAKNESS_2.md)
-// tests fork() as part of bitmask=28: a successful fork() from within the app
-// signals that the process sandbox has been weakened (jailbreak indicator).
+// BSHasApp.cekL2Int (0x324d4 in blueshield.framework) tests fork() as part of
+// bitmask=28: a successful fork() signals the sandbox has been weakened.
+// Return EPERM → BlueShield sees the sandbox is intact → no reason=0.
 //
-// We hook fork() to return -1 (EPERM) when gShouldHideJailbreak is true.
-// litehook has no trampoline, so the pass-through path uses syscall(SYS_fork)
-// directly. The pass-through branch is unreachable when the hook is installed
-// (installed only when gShouldHideJailbreak is already true), but is kept for
-// defensive correctness.
+// CONFLICT: MBRaspSdk sub_14F44 (18ed IDA, 0x14F44) calls fork() via
+// dlsym(RTLD_DEFAULT, "fork") and returns 1 (detected) when fork() returns
+// EPERM — it interprets EPERM as evidence that fork() has been hooked to fake
+// the sandbox. This feeds into sub_150B0 → sub_33D2C → reason=5 (WS0026).
 //
-// RUNTIME NOTE: on stock Dopamine (intact app sandbox), fork() already fails for
-// sandboxed apps. This hook is defensive; it is harmless if fork() already fails.
+// FIX: use dladdr() on __builtin_return_address(0) to distinguish callers.
+// MBRaspSdk callers get real fork() — sub_14F44 kills the child itself via
+// kill(pid, SIGTERM) — so its detection returns 0 (clean). All other callers
+// (BlueShield, app code) still get EPERM.
 
 static pid_t hook_fork(void) {
     if (gShouldHideJailbreak) {
+        Dl_info info;
+        if (dladdr(__builtin_return_address(0), &info) &&
+            info.dli_fname && strstr(info.dli_fname, "MBRaspSdk")) {
+            // MBRaspSdk sub_14F44 fork check — let it succeed so sub_14F44
+            // returns 0 (clean). Exit child immediately; sub_14F44 also
+            // sends SIGTERM to the child, so either path terminates it.
+            pid_t pid = (pid_t)syscall(SYS_fork);
+            if (pid == 0) _exit(0);
+            return pid;
+        }
         errno = EPERM;
         return -1;
     }

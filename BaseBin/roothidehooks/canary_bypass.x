@@ -110,6 +110,7 @@ __attribute__((visibility("default"))) void canaryBypassInit(void)
 //   +[OSLogStore localStoreAndReturnError:]  → replaced_localStoreAndReturnError
 //   -[NSFileManager fileExistsAtPath:]       → replaced_fileExistsAtPath
 //   -[NSFileManager fileExistsAtPath:isDirectory:] → replaced_fileExistsAtPathIsDirectory
+//   -[NSFileManager isReadableFileAtPath:]   → replaced_isReadableFileAtPath
 //   -[NSFileManager contentsOfDirectoryAtPath:error:] → replaced_contentsOfDirectoryAtPath
 //   -[UIApplication canOpenURL:]             → replaced_canOpenURL
 //
@@ -256,6 +257,18 @@ static BOOL replaced_fileExistsAtPath(id self, SEL sel, NSString *path) {
     }
     BOOL ret = orig_fileExistsAtPath(self, sel, path);
     if (ret) RH_LOG("NSFileMgr.fileExistsAtPath PASS(YES): %s", [path UTF8String] ?: "");
+    return ret;
+}
+
+static BOOL (*orig_isReadableFileAtPath)(id self, SEL sel, NSString *path) = NULL;
+
+static BOOL replaced_isReadableFileAtPath(id self, SEL sel, NSString *path) {
+    if (jailbreakBypassShouldBlockPath(path)) {
+        RH_LOG("NSFileMgr.isReadableFileAtPath BLOCKED: %s", [path UTF8String] ?: "");
+        return NO;
+    }
+    BOOL ret = orig_isReadableFileAtPath(self, sel, path);
+    if (ret) RH_LOG("NSFileMgr.isReadableFileAtPath PASS(YES): %s", [path UTF8String] ?: "");
     return ret;
 }
 
@@ -432,7 +445,7 @@ __attribute__((visibility("default"))) void zdefendBypassInit(void)
 // Fix: return NO for known jailbreak tool URL schemes (cydia://, sileo://, etc.)
 // Uses method_setImplementation (PAC-aware, handles compact method encoding on
 // iOS 15+ UIKit) — same approach as localStoreAndReturnError: hook above.
-// RuntimeHookChecker bypass: recorded via rh_record_method (slot 5/8).
+// RuntimeHookChecker bypass: recorded via rh_record_method (slot 6/8).
 
 static BOOL (*orig_canOpenURL)(id self, SEL sel, NSURL *url) = NULL;
 
@@ -535,6 +548,15 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                             (IMP)replaced_fileExistsAtPathIsDirectory,
                             (IMP *)&orig_fileExistsAtPathIsDirectory);
             rh_record_method(m_fepid, (IMP)orig_fileExistsAtPathIsDirectory);
+        }
+        {
+            Method m_irfap = class_getInstanceMethod([NSFileManager class],
+                                                     @selector(isReadableFileAtPath:));
+            MSHookMessageEx([NSFileManager class],
+                            @selector(isReadableFileAtPath:),
+                            (IMP)replaced_isReadableFileAtPath,
+                            (IMP *)&orig_isReadableFileAtPath);
+            rh_record_method(m_irfap, (IMP)orig_isReadableFileAtPath);
         }
         // Defensive: +[MC1 getAllFramworks] (0x20394) calls contentsOfDirectoryAtPath:
         // to list the app's /Frameworks dir. Jailbreak dylibs are NOT in /Frameworks
