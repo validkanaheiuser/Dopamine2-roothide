@@ -1429,12 +1429,14 @@ void roothide_init_with_executable(const char* executable)
 		litehook_hook_function(fork, hook_fork);
 		RH_LOG("hook_fork installed");
 
-		// reason=9: developer_mode_status sysctl intercepts for app processes.
-		if (__builtin_available(iOS 16.0, *)) {
-			litehook_hook_function(__sysctl, __sysctl_hook);
-			litehook_hook_function(__sysctlbyname, __sysctlbyname_hook);
-			RH_LOG("sysctl hooks installed (iOS16+)");
-		}
+		// reason=9 (iOS16+): developer_mode_status sysctl spoofing.
+		// reason=4 (all iOS): clear P_SELECT (bit 0x40) from kp_proc.p_flag so
+		// MBRaspSdk sub_E600 (hackingTools type 8) always reads a clean kinfo_proc.
+		// __sysctl_hook handles both; on iOS <16 the developer_mode_status OID
+		// resolve fails (cached_namelen=0), making that branch a no-op.
+		litehook_hook_function(__sysctl, __sysctl_hook);
+		litehook_hook_function(__sysctlbyname, __sysctlbyname_hook);
+		RH_LOG("sysctl hooks installed");
 
 		// Fix C — Phase 2: restore BSDPMRHide IMPs.
 		restore_canary_imps();
