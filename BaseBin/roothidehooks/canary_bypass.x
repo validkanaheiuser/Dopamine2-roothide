@@ -107,12 +107,13 @@ __attribute__((visibility("default"))) void canaryBypassInit(void)
 // roothidehooks.dylib) triggers reason=5.
 //
 // We hook via MSHookMessageEx / method_setImplementation:
-//   +[OSLogStore localStoreAndReturnError:]  → replaced_localStoreAndReturnError
-//   -[NSFileManager fileExistsAtPath:]       → replaced_fileExistsAtPath
-//   -[NSFileManager fileExistsAtPath:isDirectory:] → replaced_fileExistsAtPathIsDirectory
-//   -[NSFileManager isReadableFileAtPath:]   → replaced_isReadableFileAtPath
-//   -[NSFileManager contentsOfDirectoryAtPath:error:] → replaced_contentsOfDirectoryAtPath
-//   -[UIApplication canOpenURL:]             → replaced_canOpenURL
+//   +[OSLogStore localStoreAndReturnError:]   → replaced_localStoreAndReturnError (slot 0)
+//   +[OSLogStore storeWithScope:error:]       → replaced_storeWithScope           (slot 1)
+//   -[NSFileManager fileExistsAtPath:]        → replaced_fileExistsAtPath          (slot 2)
+//   -[NSFileManager fileExistsAtPath:isDirectory:] → replaced_fileExistsAtPathIsDirectory (slot 3)
+//   -[NSFileManager isReadableFileAtPath:]    → replaced_isReadableFileAtPath      (slot 4)
+//   -[NSFileManager contentsOfDirectoryAtPath:error:] → replaced_contentsOfDirectoryAtPath (slot 5)
+//   -[UIApplication canOpenURL:]              → replaced_canOpenURL                (slot 6)
 //
 // After each MSHookMessageEx the method table entry has our IMP. When
 // RuntimeHookChecker calls method_getImplementation(m) for those methods it
@@ -445,7 +446,7 @@ __attribute__((visibility("default"))) void zdefendBypassInit(void)
 // Fix: return NO for known jailbreak tool URL schemes (cydia://, sileo://, etc.)
 // Uses method_setImplementation (PAC-aware, handles compact method encoding on
 // iOS 15+ UIKit) — same approach as localStoreAndReturnError: hook above.
-// RuntimeHookChecker bypass: recorded via rh_record_method (slot 6/8).
+// RuntimeHookChecker bypass: recorded via rh_record_method (slot 6/8 for canOpenURL:).
 
 static BOOL (*orig_canOpenURL)(id self, SEL sel, NSURL *url) = NULL;
 
@@ -455,6 +456,63 @@ static BOOL replaced_canOpenURL(id self, SEL sel, NSURL *url) {
         return NO;
     }
     return orig_canOpenURL(self, sel, url);
+}
+
+// ─── BSHasApp cekL3Int: OSLogStore.storeWithScope:error: bypass ──────────────
+//
+// cekL3Int (0x32D9C, blueshield.framework r82q) calls
+//   +[OSLogStore storeWithScope:1 error:&err]
+// to open a system-scoped log store, then queries it with a predicate to detect
+// jailbreak indicators in the log stream (including strings emitted by injected
+// dylibs such as ElleKit and roothidehooks itself).
+//
+// The existing localStoreAndReturnError: hook covers BSLogCek (0x38a00) which
+// uses a different entry point. cekL3Int specifically uses storeWithScope:error:
+// to avoid being blocked by that hook. IDA-confirmed (r82q, W23=0x1218):
+//   str_40903481504, wc=0x121B-W23=3, key=0x1A7DA686-W23 → "storeWithScope:error:"
+//
+// IDA-confirmed (r82q, W23=0x1218, disasm 3308c: SUB W2, #0x121E, W23 = 6):
+//   str_40903481504, wc=6, key=0x1A7DA686-W23 → "storeWithScope:error:" (21 chars)
+// Fix: return nil from storeWithScope:error: → cekL3Int obtains no log store →
+// enumerates zero entries → finds no jailbreak evidence.
+
+static id (*orig_storeWithScope)(Class cls, SEL sel, NSInteger scope, NSError **error) = NULL;
+
+static id replaced_storeWithScope(Class cls, SEL sel, NSInteger scope, NSError **error) {
+    RH_LOG("cekL3Int: OSLogStore.storeWithScope:error: blocked (scope=%ld)", (long)scope);
+    if (error) *error = nil;
+    return nil;
+}
+
+// ─── BSHasApp cekL2Int: NSClassFromString("LSApplicationWorkspace") bypass ───
+//
+// cekL2Int (0x324D4, blueshield.framework r82q) uses NSClassFromString as its
+// first gate. IDA-confirmed decode (r82q, W26=0x3D8F):
+//   str_174047467680, wc=9, key=0x7402089F-W26 → base64 → XOR → "LSApplicationWorkspace"
+//
+// If LSApplicationWorkspace is present in the process (happens on Dopamine when
+// injected libs load LaunchServices as a side-effect), cekL2Int calls:
+//   [[LSApplicationWorkspace defaultWorkspace]
+//       isApplicationAvailableToOpenURL: [NSURL URLWithString: url] error: &err]
+// for each jailbreak URL scheme in its outer NSFastEnumeration loop. This is a
+// deliberate bypass of our canOpenURL: hook — it queries LaunchServices directly.
+//
+// Fix: return Nil from NSClassFromString for "LSApplicationWorkspace" → class
+// lookup fails → CBZ X23, loc_32D60 branch taken → loop continues with W22=0
+// (no detection) for every iteration → cekL2Int always returns clean.
+//
+// NSClassFromString is a C function (not an ObjC method), so MSHookFunction is
+// used instead of method_setImplementation. RuntimeHookChecker only scans ObjC
+// method tables — this trampoline hook is not visible to it; no rh_record_method.
+
+static Class (*orig_NSClassFromString)(NSString *aClassName) = NULL;
+
+static Class replaced_NSClassFromString(NSString *aClassName) {
+    if (aClassName && [aClassName isEqualToString:@"LSApplicationWorkspace"]) {
+        RH_LOG("cekL2Int: NSClassFromString(LSApplicationWorkspace) -> Nil");
+        return Nil;
+    }
+    return orig_NSClassFromString(aClassName);
 }
 
 __attribute__((visibility("default"))) void logScanBypassInit(void)
@@ -511,6 +569,16 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             IMP oldOlsImp = method_setImplementation(m_ols, (IMP)replaced_localStoreAndReturnError);
             orig_localStoreAndReturnError = (__typeof__(orig_localStoreAndReturnError))oldOlsImp;
             rh_record_method(m_ols, oldOlsImp);
+        }
+        // ── Hook +[OSLogStore storeWithScope:error:] → nil: disables cekL3Int ─
+        // cekL3Int (blueshield r82q 0x32D9C) uses storeWithScope:error: specifically
+        // to avoid being caught by the localStoreAndReturnError: hook above.
+        Method m_sws = class_getInstanceMethod(osLogStoreMeta,
+                                               @selector(storeWithScope:error:));
+        if (m_sws) {
+            IMP oldSwsImp = method_setImplementation(m_sws, (IMP)replaced_storeWithScope);
+            orig_storeWithScope = (__typeof__(orig_storeWithScope))oldSwsImp;
+            rh_record_method(m_sws, oldSwsImp);
         }
     }
 
@@ -585,5 +653,16 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
             }
         }
+        // ── Hook NSClassFromString → Nil for "LSApplicationWorkspace" ─────────
+        // cekL2Int (blueshield r82q 0x324D4) calls NSClassFromString as its first
+        // gate. If LSApplicationWorkspace is in-process, cekL2Int uses
+        // [[LSApplicationWorkspace defaultWorkspace] isApplicationAvailableToOpenURL:]
+        // to detect jailbreak app URL schemes, bypassing canOpenURL: above entirely.
+        // MSHookFunction (not method_setImplementation): NSClassFromString is a C
+        // function. RuntimeHookChecker only scans ObjC method tables — not visible.
+        MSHookFunction((void *)NSClassFromString,
+                       (void *)replaced_NSClassFromString,
+                       (void **)&orig_NSClassFromString);
+        RH_LOG("NSClassFromString hooked (cekL2Int LSApplicationWorkspace bypass)");
     }
 }
