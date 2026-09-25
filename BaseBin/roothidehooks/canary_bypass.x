@@ -26,6 +26,12 @@ static inline void rh_log(const char *fmt, ...) {
 #define RH_LOG(fmt, ...) ((void)0)
 #endif
 
+// Build identity — always embedded in the binary regardless of RHHIDE_DEBUG.
+// On device: strings /basebin/roothidehooks.dylib | grep rhhooks-build
+// Not logged to OSLog in production → invisible to BlueShield/ZDefend log scan.
+__attribute__((used, visibility("default")))
+const char rhhooks_build[] = "rhhooks-build:" RHHOOKS_COMMIT;
+
 // BSDPMRHide (0x80600 in blueshield.framework) is a canary/honeypot ObjC class
 // designed by Singalarity BlueShield to detect ObjC hook frameworks
 // (DOPAMINE_WEAKNESS.md §3A, Layer A).
@@ -473,15 +479,53 @@ static BOOL replaced_canOpenURL(id self, SEL sel, NSURL *url) {
 //
 // IDA-confirmed (r82q, W23=0x1218, disasm 3308c: SUB W2, #0x121E, W23 = 6):
 //   str_40903481504, wc=6, key=0x1A7DA686-W23 → "storeWithScope:error:" (21 chars)
-// Fix: return nil from storeWithScope:error: → cekL3Int obtains no log store →
-// enumerates zero entries → finds no jailbreak evidence.
+// Fix: return nil + non-nil error from storeWithScope:error:.
+//
+// cekL3Int's state machine at 330f8 checks *error after the call:
+//   CMP X22, #0  (X22 = retained *error)
+//   CSEL W8, W9(13), W8(5), EQ   ← nil error → base=13; non-nil error → base=5
+//
+// With *error=nil (old hook): state machine follows base=13 path → case 13 at
+// 0x33F60, which unconditionally creates a non-empty NSArray (a detection record)
+// from a fixed deobfuscated class-method call, and returns it immediately.
+// BSHasApp.apply stores this non-empty array → reports WS0026 reason=5.
+//
+// With *error=non-nil (this fix): state machine follows base=5 path → case 5 at
+// 0x332B8, which operates on the nil store. Every ObjC call to nil returns nil,
+// so all log-scan results are nil → case 5 transitions to the clean exit
+// (cases 6/8 at 0x33DB0 → ___NSArray0__ empty array) → no detection.
 
 static id (*orig_storeWithScope)(Class cls, SEL sel, NSInteger scope, NSError **error) = NULL;
 
 static id replaced_storeWithScope(Class cls, SEL sel, NSInteger scope, NSError **error) {
     RH_LOG("cekL3Int: OSLogStore.storeWithScope:error: blocked (scope=%ld)", (long)scope);
-    if (error) *error = nil;
+    if (error) {
+        *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                    code:NSFileReadNoPermissionError
+                                userInfo:nil];
+    }
     return nil;
+}
+
+// ─── Direct -[BSHasApp cekL3Int:] hook ───────────────────────────────────────
+//
+// IDA-verified (r82q): cekL3Int (0x32D9C) is a 14-case obfuscated state machine.
+// The storeWithScope:error: hook above routes it to case 5, but case 5's exit
+// state = (1 - W24>>17) & 0xF where W24 = W9 * 0x73D55909, W9 = lower 32 bits
+// of sel_countByEnumeratingWithState:objects:count: at runtime. W9 is ASLR-
+// dependent → case 5's next state is not statically determinable. The storeWithScope
+// fix alone cannot guarantee a clean exit; case 5 may route to case 11 or 13
+// (detection) depending on the runtime SEL address.
+//
+// Fix: hook cekL3Int directly → returns @[] before the state machine runs.
+// BSHasApp instance method table (0x7B310, count=6, entsize=0x18 absolute):
+//   cekL3Int: is slot 3, IMP at 0x32D9C. class_getInstanceMethod finds it
+//   directly (not inherited). method_setImplementation handles absolute lists.
+static NSArray* (*orig_cekL3Int)(id self, SEL sel, id arg) = NULL;
+
+static NSArray* replaced_cekL3Int(id self, SEL sel, id arg) {
+    RH_LOG("cekL3Int: -[BSHasApp cekL3Int:] bypassed (returning empty array)");
+    return @[];
 }
 
 // ─── BSHasApp cekL2Int: NSClassFromString("LSApplicationWorkspace") bypass ───
@@ -517,7 +561,7 @@ static Class replaced_NSClassFromString(NSString *aClassName) {
 
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
-    RH_LOG("logScanBypassInit called");
+    RH_LOG("logScanBypassInit called (build: " RHHOOKS_COMMIT ")");
 
     // ── RuntimeHookChecker bypass: install method_getImplementation hook first ──
     // Only needed for MBV Bank: _TtC9MBRaspSdk18RuntimeHookChecker (in MBRaspSdk)
@@ -668,5 +712,23 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                        (void *)replaced_NSClassFromString,
                        (void **)&orig_NSClassFromString);
         RH_LOG("NSClassFromString hooked (cekL2Int LSApplicationWorkspace bypass)");
+        // ── Hook -[BSHasApp cekL3Int:] → @[] ─────────────────────────────────────
+        // IDA-verified: case 5 next state = (1 - W24>>17) & 0xF, runtime-dependent.
+        // storeWithScope fix alone is insufficient. This hook short-circuits the
+        // entire state machine before it runs. Inside ZDefend guard: BSHasApp is
+        // BlueShield-only. method_setImplementation handles absolute method list
+        // (entsize=0x18). rh_record_method registers original blueshield.__TEXT IMP.
+        {
+            Class bsHasApp = objc_getClass("BSHasApp");
+            if (bsHasApp) {
+                Method m_cekL3 = class_getInstanceMethod(bsHasApp, @selector(cekL3Int:));
+                if (m_cekL3) {
+                    IMP oldCekL3Imp = method_setImplementation(m_cekL3, (IMP)replaced_cekL3Int);
+                    orig_cekL3Int = (__typeof__(orig_cekL3Int))oldCekL3Imp;
+                    rh_record_method(m_cekL3, oldCekL3Imp);
+                    RH_LOG("cekL3Int: -[BSHasApp cekL3Int:] hooked");
+                }
+            }
+        }
     }
 }
