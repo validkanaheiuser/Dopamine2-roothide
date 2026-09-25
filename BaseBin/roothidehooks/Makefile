@@ -9,7 +9,8 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = roothidehooks
 
 roothidehooks_FILES = $(wildcard *.x) $(wildcard *.c) $(wildcard *.m)
-roothidehooks_CFLAGS = -Werror -fobjc-arc -I../.include $(if $(RHHIDE_DEBUG),-DRHHIDE_DEBUG) -DRHHOOKS_COMMIT='"$(shell git rev-parse --short HEAD)"'
+RHHOOKS_VERSION := 2.4.9.$(shell git rev-list --count HEAD)-$(shell git rev-parse --short HEAD)
+roothidehooks_CFLAGS = -Werror -fobjc-arc -I../.include $(if $(RHHIDE_DEBUG),-DRHHIDE_DEBUG) -DRHHOOKS_VERSION='"$(RHHOOKS_VERSION)"'
 roothidehooks_LDFLAGS = -rpath @loader_path/.jbroot/Library/Frameworks -rpath @loader_path/fallback -L../libjailbreak -ljailbreak
 roothidehooks_INSTALL_PATH = /basebin
 

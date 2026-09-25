@@ -28,9 +28,10 @@ static inline void rh_log(const char *fmt, ...) {
 
 // Build identity — always embedded in the binary regardless of RHHIDE_DEBUG.
 // On device: strings /basebin/roothidehooks.dylib | grep rhhooks-build
+// Format: 2.4.9.<commit-count>-<short-hash>  e.g. 2.4.9.43-0470d71
 // Not logged to OSLog in production → invisible to BlueShield/ZDefend log scan.
 __attribute__((used, visibility("default")))
-const char rhhooks_build[] = "rhhooks-build:" RHHOOKS_COMMIT;
+const char rhhooks_build[] = "rhhooks-build:" RHHOOKS_VERSION;
 
 // BSDPMRHide (0x80600 in blueshield.framework) is a canary/honeypot ObjC class
 // designed by Singalarity BlueShield to detect ObjC hook frameworks
@@ -561,7 +562,7 @@ static Class replaced_NSClassFromString(NSString *aClassName) {
 
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
-    RH_LOG("logScanBypassInit called (build: " RHHOOKS_COMMIT ")");
+    RH_LOG("logScanBypassInit called (build: " RHHOOKS_VERSION ")");
 
     // ── RuntimeHookChecker bypass: install method_getImplementation hook first ──
     // Only needed for MBV Bank: _TtC9MBRaspSdk18RuntimeHookChecker (in MBRaspSdk)
