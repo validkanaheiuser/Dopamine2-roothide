@@ -595,9 +595,13 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
     //    detecting the hook. Without method_getImplementation intercepted, hooking
     //    NSFileManager creates a detection surface with no benefit.
     //
-    // On Dopamine roothide the paths BSZInspection checks (/var/jb/, dpkg, Cydia, etc.)
-    // do not exist regardless, so these hooks never block anything in practice for
-    // either app; their purpose is solely to satisfy RuntimeHookChecker for MBV Bank.
+    // BSZInspection.checkZimFrameworkInternal: does NOT fire on Dopamine: ElleKit exports
+    // no ObjC classes (libellekit.tbd has no objc-classes: section), so objc_getClass
+    // returns nil for all Substrate/ElleKit class names → W27 bit 0 never set → no
+    // detection from that path. However, BSHasApp.apply case 7 ("ScanLog" checks via
+    // cekL3Int:) calls fileExistsAtPath: on jailbreak paths at runtime, so these hooks
+    // actively block that detection.  They are also required for RuntimeHookChecker
+    // (MBRaspSdk) so our IMPs are registered in the orig-IMP table.
     if (objc_getClass("ZDefend") == NULL) {
         {
             Method m_fep = class_getInstanceMethod([NSFileManager class],
