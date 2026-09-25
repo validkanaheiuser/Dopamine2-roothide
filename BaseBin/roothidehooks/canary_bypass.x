@@ -731,5 +731,23 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
             }
         }
+        // ── Hook -[BSLogCek cekL3Int:] → @[] ─────────────────────────────────────
+        // IDA-verified (r82q 0x38A00): BSLogCek is a SEPARATE checker class with its
+        // own apply method and NSFastEnumeration loop that dispatches [self cekL3Int:]
+        // on a BSLogCek instance → BSLogCek.cekL3Int: (IMP 0x39204), independent from
+        // BSHasApp's patched IMP. Both classes scan OS logs for hooking framework
+        // strings. Method list at 0x7C228 (count=4): apply/cekL3Int:/logLevelName:/
+        // getChecks. No rh_record_method: RuntimeHookChecker only audits Foundation
+        // classes, not BlueShield-internal methods.
+        {
+            Class bsLogCek = objc_getClass("BSLogCek");
+            if (bsLogCek) {
+                Method m_logCekL3 = class_getInstanceMethod(bsLogCek, @selector(cekL3Int:));
+                if (m_logCekL3) {
+                    method_setImplementation(m_logCekL3, (IMP)replaced_cekL3Int);
+                    RH_LOG("cekL3Int: -[BSLogCek cekL3Int:] hooked");
+                }
+            }
+        }
     }
 }
