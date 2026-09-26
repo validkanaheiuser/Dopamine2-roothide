@@ -646,12 +646,11 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
     //    detecting the hook. Without method_getImplementation intercepted, hooking
     //    NSFileManager creates a detection surface with no benefit.
     //
-    // BSZInspection.checkZimFrameworkInternal: does NOT fire on Dopamine: ElleKit exports
-    // no ObjC classes (libellekit.tbd has no objc-classes: section), so objc_getClass
-    // returns nil for all Substrate/ElleKit class names → W27 bit 0 never set → no
-    // detection from that path. However, BSHasApp.apply case 7 ("ScanLog" checks via
-    // cekL3Int:) calls fileExistsAtPath: on jailbreak paths at runtime, so these hooks
-    // actively block that detection.  They are also required for RuntimeHookChecker
+    // BSZInspection.checkZimFrameworkInternal: is now hooked above to return NO.
+    // Previous assumption ("doesn't fire for Dopamine") was wrong — runtime evidence
+    // shows detection fires before any cekL3Int:/canOpenURL: hook call, pointing to
+    // BSZInspection as the trigger. The NSFileManager hooks below remain for
+    // BSHasApp.apply case 7 ("ScanLog" checks via cekL3Int:) and for RuntimeHookChecker
     // (MBRaspSdk) so our IMPs are registered in the orig-IMP table.
     if (objc_getClass("ZDefend") == NULL) {
         {
@@ -744,6 +743,34 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
             } else {
                 RH_LOG("cekL3Int: BSHasApp class NOT FOUND");
+            }
+        }
+        // ── Hook -[BSZInspection checkZimFrameworkInternal:] → NO ───────────────
+        // IDA-verified (r82q 0x610C): BSZInspection checks for hooking framework
+        // ObjC class names via SCP_StrDeobf (runtime-seeded XOR, undecodable
+        // statically). We assumed it doesn't fire because ElleKit has no ObjC
+        // classes, but runtime evidence shows detection fires before cekL3Int:/
+        // canOpenURL:/storeWithScope: are ever called — BSZInspection is the only
+        // known early-running path. Force-return NO to block it.
+        {
+            Class bsZInspection = objc_getClass("BSZInspection");
+            if (bsZInspection) {
+                Method m_czfi = class_getInstanceMethod(bsZInspection,
+                                    @selector(checkZimFrameworkInternal:));
+                if (m_czfi) {
+                    method_setImplementation(m_czfi, imp_implementationWithBlock(
+                        ^BOOL(id _self, id arg) {
+                            RH_LOG("BSZInspection.checkZimFrameworkInternal: BLOCKED arg=%s",
+                                   [[arg description] UTF8String] ?: "(nil)");
+                            return NO;
+                        }
+                    ));
+                    RH_LOG("BSZInspection.checkZimFrameworkInternal: hooked");
+                } else {
+                    RH_LOG("BSZInspection: checkZimFrameworkInternal: method MISSING");
+                }
+            } else {
+                RH_LOG("BSZInspection class NOT FOUND");
             }
         }
         // ── Hook -[BSLogCek cekL3Int:] → @[] ─────────────────────────────────────
