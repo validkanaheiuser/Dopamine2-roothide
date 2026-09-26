@@ -571,13 +571,16 @@ static IMP s_bsz_apply_orig = NULL;
 static Class (*orig_objc_getClass_fn)(const char *name) = NULL;
 static Class replaced_objc_getClass_fn(const char *name) {
     Class result = orig_objc_getClass_fn(name);
-    Dl_info dl;
-    void *ret = __builtin_return_address(0);
-    if (dladdr(ret, &dl) && dl.dli_fname && strstr(dl.dli_fname, "blueshield")) {
-        RH_LOG("objc_getClass[bs +0x%lx]: %s -> %s",
-               (unsigned long)((char *)ret - (char *)dl.dli_fbase),
-               name ?: "(nil)",
-               result ? "(found)" : "(nil)");
+    // dladdr caller filter was removed: MSHookFunction trampolines sit in anonymous
+    // mmap pages so __builtin_return_address(0) resolves to the trampoline, not the
+    // caller library — making any "blueshield" dladdr filter always fail (0 entries).
+    // Log all hits (non-nil results) — noisy but captures every class BlueShield finds.
+    if (result) {
+        Dl_info dl;
+        void *ret = __builtin_return_address(0);
+        const char *lib = "(?)";
+        if (dladdr(ret, &dl) && dl.dli_fname) lib = dl.dli_fname;
+        RH_LOG("objc_getClass[HIT]: %s  caller=%s", name ?: "(nil)", lib);
     }
     return result;
 }
@@ -857,14 +860,54 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 RH_LOG("cekL3Int: BSLogCek class NOT FOUND");
             }
         }
+        // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
+        // MC1.isFrameworkAvailable (blueshield.framework) scans the dyld image list
+        // for known hooking framework names. Fix B (roothider_main.c) intercepts
+        // _dyld_image_count/_dyld_get_image_name to hide jailbreak dylibs, but MC1
+        // may use dyld_all_image_infos directly (bypassing our API hooks) or call
+        // dlopen/dladdr in ways we don't cover. Belt-and-suspenders: hook the ObjC
+        // class method directly to always return NO.
+        {
+            Class mc1Meta = objc_getMetaClass("MC1");
+            if (mc1Meta) {
 #ifdef RHHIDE_DEBUG
-        // ── Debug: hook objc_getClass → log all BlueShield class lookups ─────────
-        // Installed after all other hooks so we don't log our own init-time lookups.
-        // Caller-filtered: only logs calls from within blueshield.framework.
+                {
+                    unsigned int mc = 0;
+                    Method *ms = class_copyMethodList(mc1Meta, &mc);
+                    RH_LOG("MC1: %u class methods", mc);
+                    for (unsigned int i = 0; i < mc; i++) {
+                        RH_LOG("  MC1[%u]: +%s imp=%p", i,
+                               sel_getName(method_getName(ms[i])),
+                               (void *)method_getImplementation(ms[i]));
+                    }
+                    if (ms) free(ms);
+                }
+#endif
+                Method m_ifa = class_getInstanceMethod(mc1Meta,
+                                   @selector(isFrameworkAvailable));
+                if (m_ifa) {
+                    method_setImplementation(m_ifa, imp_implementationWithBlock(
+                        ^BOOL(id _cls) {
+                            RH_LOG("MC1.isFrameworkAvailable: BLOCKED → NO");
+                            return NO;
+                        }
+                    ));
+                    RH_LOG("MC1.isFrameworkAvailable: hooked");
+                } else {
+                    RH_LOG("MC1: isFrameworkAvailable method MISSING");
+                }
+            } else {
+                RH_LOG("MC1 metaclass NOT FOUND");
+            }
+        }
+#ifdef RHHIDE_DEBUG
+        // ── Debug: hook objc_getClass → log all non-nil class lookups ────────────
+        // Caller filter removed (see comment in replaced_objc_getClass_fn above).
+        // Installed LAST so we don't log our own init-time objc_getClass calls above.
         MSHookFunction((void *)objc_getClass,
                        (void *)replaced_objc_getClass_fn,
                        (void **)&orig_objc_getClass_fn);
-        RH_LOG("objc_getClass hooked (BlueShield call tracer)");
+        RH_LOG("objc_getClass hooked (class hit tracer)");
 #endif
     }
 }
