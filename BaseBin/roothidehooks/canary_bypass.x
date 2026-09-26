@@ -567,6 +567,57 @@ static Class replaced_NSClassFromString(NSString *aClassName) {
 // ─── BSZInspection.apply call-through trampoline ─────────────────────────────
 static IMP s_bsz_apply_orig = NULL;
 
+// ─── openURL:options:completionHandler: threat-redirect callstack capture ─────
+//
+// When BlueShield fires a threat response it calls:
+//   [[UIApplication sharedApplication] openURL:threatURL
+//                                       options:@{} completionHandler:nil]
+// where threatURL = https://pro-threats.nbowree.com/threats?reason={4|5}
+//
+// The "all hooks installed, none ever fires before detection" pattern in c0444b6
+// (zero contentsOfDirectoryAtPath, BSZInspection.apply, cekL3Int, canOpenURL)
+// indicates BlueShield's +load constructor at 0x64428 (363 instructions, CFF)
+// performs an early integrity check — potentially scanning Mach-O headers for
+// hooked memory regions — and reaches the threat URL path WITHOUT going through
+// checkTrustedEnv's normal checker chain (MC1, BSHasApp, BSLogCek, etc.).
+//
+// This hook: (RHHIDE_DEBUG only)
+//   1. Detects the nbowree/reason= redirect URL
+//   2. Prints URL + 30-frame callstack to OS log
+//   3. BLOCKS the redirect (keeps the process alive so subsequent log lines remain)
+//
+// The callstack will show exactly which BlueShield function invoked openURL —
+// whether it is from the +load constructor (0x64428 path), from checkTrustedEnv
+// (checker class path), or from somewhere else. Cross-reference the printed
+// addresses against IDA r82q (file base 0x0) to identify the trigger.
+//
+// NEVER enable in production (RHHIDE_DEBUG=0): callstack strings go to OS log,
+// which BlueShield's BSLogCek / cekL3Int scan for bypass evidence.
+#ifdef RHHIDE_DEBUG
+static IMP s_orig_openURL_opts = NULL;
+
+static void replaced_openURL_opts(id self, SEL sel, NSURL *url,
+                                  NSDictionary *opts, void(^handler)(BOOL))
+{
+    NSString *urlStr = [url absoluteString];
+    if (urlStr && ([urlStr containsString:@"nbowree"] ||
+                   [urlStr containsString:@"reason=5"] ||
+                   [urlStr containsString:@"reason=4"])) {
+        RH_LOG("THREAT_REDIRECT BLOCKED url=%s", [urlStr UTF8String]);
+        NSArray *stack = [NSThread callStackSymbols];
+        NSUInteger lim = MIN([stack count], 30U);
+        for (NSUInteger i = 0; i < lim; i++) {
+            RH_LOG("THREAT_STACK[%02lu]: %s", (unsigned long)i,
+                   [[stack objectAtIndex:i] UTF8String]);
+        }
+        if (handler) handler(NO);
+        return;
+    }
+    ((void (*)(id, SEL, NSURL *, NSDictionary *, void(^)(BOOL)))s_orig_openURL_opts)(
+        self, sel, url, opts, handler);
+}
+#endif
+
 // ─── Diagnostic: objc_getClass hook (RHHIDE_DEBUG only) ──────────────────────
 // Reveals what ObjC class names BlueShield/BSZInspection probes for via
 // SCP_StrDeobf. Only installed in RHHIDE_DEBUG builds — too noisy/slow for
@@ -913,6 +964,26 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             }
         }
 #ifdef RHHIDE_DEBUG
+        // ── openURL:options:completionHandler: threat redirect capture ────────────
+        // Intercepts the BlueShield threat-URL open to: (a) log the URL + 30-frame
+        // callstack (cross-reference addresses against IDA r82q file-base 0x0), and
+        // (b) block the redirect so the process stays alive for further log analysis.
+        // Must be installed BEFORE the objc_getClass tracer so its installation calls
+        // (objc_getClass("UIApplication")) are NOT logged by the tracer.
+        {
+            Class uiAppCls = objc_getClass("UIApplication");
+            if (uiAppCls) {
+                SEL openURLSel = @selector(openURL:options:completionHandler:);
+                Method m_ouo = class_getInstanceMethod(uiAppCls, openURLSel);
+                if (m_ouo) {
+                    s_orig_openURL_opts = method_setImplementation(
+                        m_ouo, (IMP)replaced_openURL_opts);
+                    RH_LOG("openURL:opts:handler: hooked for threat redirect capture");
+                } else {
+                    RH_LOG("openURL:opts:handler: method MISSING");
+                }
+            }
+        }
         // ── Debug: hook objc_getClass → log all non-nil class lookups ────────────
         // Caller filter removed (see comment in replaced_objc_getClass_fn above).
         // Installed LAST so we don't log our own init-time objc_getClass calls above.
