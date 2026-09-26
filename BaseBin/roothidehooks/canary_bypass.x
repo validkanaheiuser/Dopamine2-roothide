@@ -450,10 +450,12 @@ static BOOL (*orig_canOpenURL)(id self, SEL sel, NSURL *url) = NULL;
 
 static BOOL replaced_canOpenURL(id self, SEL sel, NSURL *url) {
     if (jailbreakBypassShouldBlockURL(url)) {
-        RH_LOG("UIApp.canOpenURL BLOCKED: %s", [[url absoluteString] UTF8String] ?: "");
+        RH_LOG("canOpenURL: BLOCKED %s", [[url absoluteString] UTF8String] ?: "");
         return NO;
     }
-    return orig_canOpenURL(self, sel, url);
+    BOOL result = orig_canOpenURL(self, sel, url);
+    RH_LOG("canOpenURL: PASS %s -> %d", [[url absoluteString] UTF8String] ?: "", result);
+    return result;
 }
 
 // ─── BSHasApp cekL3Int: OSLogStore.storeWithScope:error: bypass ──────────────
@@ -516,7 +518,9 @@ static id replaced_storeWithScope(Class cls, SEL sel, NSInteger scope, NSError *
 static NSArray* (*orig_cekL3Int)(id self, SEL sel, id arg) = NULL;
 
 static NSArray* replaced_cekL3Int(id self, SEL sel, id arg) {
-    RH_LOG("cekL3Int: -[BSHasApp cekL3Int:] bypassed (returning empty array)");
+    RH_LOG("cekL3Int: -[%s cekL3Int:] bypassed arg=%s",
+           class_getName(object_getClass(self)),
+           [[arg description] UTF8String] ?: "(nil)");
     return @[];
 }
 
@@ -544,11 +548,14 @@ static NSArray* replaced_cekL3Int(id self, SEL sel, id arg) {
 static Class (*orig_NSClassFromString)(NSString *aClassName) = NULL;
 
 static Class replaced_NSClassFromString(NSString *aClassName) {
-    if (aClassName && [aClassName isEqualToString:@"LSApplicationWorkspace"]) {
-        RH_LOG("cekL2Int: NSClassFromString(LSApplicationWorkspace) -> Nil");
+    if (!aClassName) return Nil;
+    if ([aClassName isEqualToString:@"LSApplicationWorkspace"]) {
+        RH_LOG("NSClassFromString: BLOCKED %s", [aClassName UTF8String]);
         return Nil;
     }
-    return orig_NSClassFromString(aClassName);
+    Class result = orig_NSClassFromString(aClassName);
+    RH_LOG("NSClassFromString: %s -> %s", [aClassName UTF8String], result ? class_getName(result) : "(nil)");
+    return result;
 }
 
 __attribute__((visibility("default"))) void logScanBypassInit(void)
@@ -605,6 +612,9 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             IMP oldOlsImp = method_setImplementation(m_ols, (IMP)replaced_localStoreAndReturnError);
             orig_localStoreAndReturnError = (__typeof__(orig_localStoreAndReturnError))oldOlsImp;
             rh_record_method(m_ols, oldOlsImp);
+            RH_LOG("OSLogStore.localStoreAndReturnError: hooked imp=%p", (void *)oldOlsImp);
+        } else {
+            RH_LOG("OSLogStore.localStoreAndReturnError: method MISSING");
         }
         // ── Hook +[OSLogStore storeWithScope:error:] → nil: disables cekL3Int ─
         // cekL3Int (blueshield r82q 0x32D9C) uses storeWithScope:error: specifically
@@ -615,7 +625,12 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             IMP oldSwsImp = method_setImplementation(m_sws, (IMP)replaced_storeWithScope);
             orig_storeWithScope = (__typeof__(orig_storeWithScope))oldSwsImp;
             rh_record_method(m_sws, oldSwsImp);
+            RH_LOG("OSLogStore.storeWithScope:error: hooked imp=%p", (void *)oldSwsImp);
+        } else {
+            RH_LOG("OSLogStore.storeWithScope:error: method MISSING");
         }
+    } else {
+        RH_LOG("OSLogStore metaclass NOT FOUND");
     }
 
     // ── Hook NSFileManager file-existence checks ──────────────────────────────
@@ -690,7 +705,12 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     IMP oldCouImp = method_setImplementation(m_cou, (IMP)replaced_canOpenURL);
                     orig_canOpenURL = (__typeof__(orig_canOpenURL))oldCouImp;
                     rh_record_method(m_cou, oldCouImp);
+                    RH_LOG("UIApplication.canOpenURL: hooked imp=%p", (void *)oldCouImp);
+                } else {
+                    RH_LOG("UIApplication.canOpenURL: method MISSING");
                 }
+            } else {
+                RH_LOG("UIApplication class NOT FOUND");
             }
         }
         // ── Hook NSClassFromString → Nil for "LSApplicationWorkspace" ─────────
@@ -718,8 +738,12 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     IMP oldCekL3Imp = method_setImplementation(m_cekL3, (IMP)replaced_cekL3Int);
                     orig_cekL3Int = (__typeof__(orig_cekL3Int))oldCekL3Imp;
                     rh_record_method(m_cekL3, oldCekL3Imp);
-                    RH_LOG("cekL3Int: -[BSHasApp cekL3Int:] hooked");
+                    RH_LOG("cekL3Int: -[BSHasApp cekL3Int:] hooked imp=%p", (void *)oldCekL3Imp);
+                } else {
+                    RH_LOG("cekL3Int: BSHasApp found but cekL3Int: method MISSING");
                 }
+            } else {
+                RH_LOG("cekL3Int: BSHasApp class NOT FOUND");
             }
         }
         // ── Hook -[BSLogCek cekL3Int:] → @[] ─────────────────────────────────────
@@ -735,9 +759,13 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             if (bsLogCek) {
                 Method m_logCekL3 = class_getInstanceMethod(bsLogCek, @selector(cekL3Int:));
                 if (m_logCekL3) {
-                    method_setImplementation(m_logCekL3, (IMP)replaced_cekL3Int);
-                    RH_LOG("cekL3Int: -[BSLogCek cekL3Int:] hooked");
+                    IMP oldLogCekL3Imp = method_setImplementation(m_logCekL3, (IMP)replaced_cekL3Int);
+                    RH_LOG("cekL3Int: -[BSLogCek cekL3Int:] hooked imp=%p", (void *)oldLogCekL3Imp);
+                } else {
+                    RH_LOG("cekL3Int: BSLogCek found but cekL3Int: method MISSING");
                 }
+            } else {
+                RH_LOG("cekL3Int: BSLogCek class NOT FOUND");
             }
         }
     }
