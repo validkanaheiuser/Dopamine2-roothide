@@ -286,16 +286,21 @@ static BOOL replaced_fileExistsAtPathIsDirectory(id self, SEL sel, NSString *pat
 }
 
 // +[MC1 getAllFramworks] (0x20394, blueshield.framework) calls
-// -[NSFileManager contentsOfDirectoryAtPath:error:] to list the app's
-// /Frameworks directory after c1Available != 0 (detection already fired).
-// It collects the result as evidence for the threat payload. Hooking here
-// cannot prevent detection (getAllFramworks is called post-detection), but
-// filters any jailbreak-named entries from the reported snapshot.
+// -[NSFileManager contentsOfDirectoryAtPath:error:] to list the app bundle's
+// /Frameworks directory. It is called BY +[MC1 isFrameworkAvailable] (0x20790)
+// as part of the MC1 detection scan (NOT post-detection).
 //
-// RUNTIME NOTE: Dopamine injects dylibs via DYLD_INSERT_LIBRARIES; they are
-// NOT placed in the app's /Frameworks directory. This hook will never filter
-// anything in practice (no jailbreak entry exists there). It is defensive only,
-// guarding against future injection methods that might use the Frameworks path.
+// IDA-verified (r82q strings at 0x6c5b0-0x6c718): MC1 uses NSFileManager
+// (NOT _dyld_image_count/_dyld_get_image_name — those are MWkpr/reason=4 only).
+// MC1 scans @executable_path/Frameworks for:
+//   (a) presence of mobilebankingx.framework (bundle-id canary MUST exist)
+//   (b) absence of hooking frameworks (ElleKit.framework, CydiaSubstrate.framework)
+//
+// RUNTIME NOTE: Dopamine injects dylibs via DYLD_INSERT_LIBRARIES at /var/jb/
+// rootless paths; they are NOT placed in the app bundle's /Frameworks directory.
+// The MC1 filesystem check therefore PASSES naturally for Dopamine/RootHide —
+// the canary is present and no hooking framework appears in /Frameworks.
+// This hook filters nothing in practice but is retained for correctness.
 //
 // RuntimeHookChecker bypass: this method is also recorded in the
 // method_getImplementation registry (rh_record_method) so that RuntimeHookChecker
@@ -674,12 +679,12 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
     //    detecting the hook. Without method_getImplementation intercepted, hooking
     //    NSFileManager creates a detection surface with no benefit.
     //
-    // BSZInspection.checkZimFrameworkInternal: is now hooked above to return NO.
-    // Previous assumption ("doesn't fire for Dopamine") was wrong — runtime evidence
-    // shows detection fires before any cekL3Int:/canOpenURL: hook call, pointing to
-    // BSZInspection as the trigger. The NSFileManager hooks below remain for
-    // BSHasApp.apply case 7 ("ScanLog" checks via cekL3Int:) and for RuntimeHookChecker
-    // (MBRaspSdk) so our IMPs are registered in the orig-IMP table.
+    // BSZInspection is NOT the reason=5 trigger — confirmed by c0444b6 runtime
+    // log: BSZInspection.apply was hooked but NEVER fired before detection.
+    // BSZInspection.checkZimFrameworkInternal: hook is still kept (belt-and-
+    // suspenders, no cost). The NSFileManager hooks below remain for BSHasApp.apply
+    // case 7 ("ScanLog" checks via cekL3Int:) and for RuntimeHookChecker (MBRaspSdk)
+    // so our IMPs are registered in the orig-IMP table.
     if (objc_getClass("ZDefend") == NULL) {
         {
             Method m_fep = class_getInstanceMethod([NSFileManager class],
@@ -861,12 +866,19 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
-        // MC1.isFrameworkAvailable (blueshield.framework) scans the dyld image list
-        // for known hooking framework names. Fix B (roothider_main.c) intercepts
-        // _dyld_image_count/_dyld_get_image_name to hide jailbreak dylibs, but MC1
-        // may use dyld_all_image_infos directly (bypassing our API hooks) or call
-        // dlopen/dladdr in ways we don't cover. Belt-and-suspenders: hook the ObjC
-        // class method directly to always return NO.
+        // IDA-verified (r82q): MC1.isFrameworkAvailable (0x20790) uses NSFileManager
+        // contentsOfDirectoryAtPath:error: (via getAllFramworks 0x20394) to scan the
+        // app bundle's /Frameworks directory — NOT dyld image list APIs. Fix B
+        // (_dyld_image_count hooks) is for MWkpr/reason=4; it does not affect MC1.
+        //
+        // MC1 detection conditions (505000 → reason=5):
+        //   (a) mobilebankingx.framework absent or tampered (canary missing)
+        //   (b) ElleKit.framework or CydiaSubstrate.framework found in /Frameworks
+        //   (c) BSDPMRHide honeypot triggered (separate check in doMC1)
+        //
+        // For Dopamine/RootHide: conditions (a) and (b) NATURALLY PASS — canary IS
+        // in the IPA, and rootless-path dylibs never appear in the app bundle's
+        // /Frameworks. This hook is belt-and-suspenders against edge cases.
         {
             Class mc1Meta = objc_getMetaClass("MC1");
             if (mc1Meta) {
