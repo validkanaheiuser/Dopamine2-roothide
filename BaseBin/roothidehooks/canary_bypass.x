@@ -105,37 +105,28 @@ __attribute__((visibility("default"))) void canaryBypassInit(void)
 	       (void *)orig_class_getClassMethod);
 }
 
-// ─── RuntimeHookChecker bypass: method_getImplementation intercept ────────────
+// ─── method_getImplementation intercept (defensive) ──────────────────────────
 //
-// _TtC9MBRaspSdk18RuntimeHookChecker (DOPAMINE_WEAKNESS_3.md §B.1) calls
-// class_getInstanceMethod + method_getImplementation to read each ObjC method's
-// IMP, then checks whether that IMP falls within the __TEXT segment of a
-// recognised system framework. Any IMP pointing outside those ranges (e.g. into
-// roothidehooks.dylib) triggers reason=5.
+// IDA-VERIFIED (2026-09-26, instance 18ed): MBRaspSdk's RuntimeHookChecker
+// (sub_14CB8, type=9 in sub_150B0) does NOT scan IMP addresses. It checks for
+// the "Shadow" jailbreak bypass tweak by calling objc_getClass("ShadowRuleset").
+// If nil → CLEAN. If class exists → checks internalDictionary method → DETECTED.
+// MBRaspSdk does NOT import _method_getImplementation. On our Dopamine setup
+// (Shadow not installed), RuntimeHookChecker always returns CLEAN and is
+// irrelevant. This hook is therefore defensive only — it has no known attacker
+// today, but it is retained because:
+//   (a) it is harmless,
+//   (b) it protects any future checker that might walk hooked method IMPs.
 //
-// We hook via MSHookMessageEx / method_setImplementation:
-//   +[OSLogStore localStoreAndReturnError:]   → replaced_localStoreAndReturnError (slot 0)
-//   +[OSLogStore storeWithScope:error:]       → replaced_storeWithScope           (slot 1)
-//   -[NSFileManager fileExistsAtPath:]        → replaced_fileExistsAtPath          (slot 2)
-//   -[NSFileManager fileExistsAtPath:isDirectory:] → replaced_fileExistsAtPathIsDirectory (slot 3)
-//   -[NSFileManager isReadableFileAtPath:]    → replaced_isReadableFileAtPath      (slot 4)
-//   -[NSFileManager contentsOfDirectoryAtPath:error:] → replaced_contentsOfDirectoryAtPath (slot 5)
-//   -[UIApplication canOpenURL:]              → replaced_canOpenURL                (slot 6)
-//
-// After each MSHookMessageEx the method table entry has our IMP. When
-// RuntimeHookChecker calls method_getImplementation(m) for those methods it
-// would see our IMP (in roothidehooks.dylib __TEXT) and fire.
-//
-// Fix: hook method_getImplementation via MSHookFunction to return stored
-// original IMPs for methods we have hooked, making RuntimeHookChecker see the
-// original Foundation IMP (inside __TEXT of Foundation/libsystem) instead.
-//
-// Implementation notes:
-//   - We record Method → origImp pairs into a small fixed array after each
-//     MSHookMessageEx call (Method pointer is stable across the hook).
-//   - method_getImplementation hook must be installed BEFORE any MSHookMessageEx
-//     call so that it is active when RuntimeHookChecker later queries those methods.
-//   - RH_HOOKED_METHOD_MAX = 8 covers all current hooks with headroom.
+// Hooked ObjC methods recorded in the registry (method_t → origImp):
+//   +[OSLogStore localStoreAndReturnError:]        (slot 0)
+//   +[OSLogStore storeWithScope:error:]            (slot 1)
+//   -[NSFileManager fileExistsAtPath:]             (slot 2)
+//   -[NSFileManager fileExistsAtPath:isDirectory:] (slot 3)
+//   -[NSFileManager isReadableFileAtPath:]         (slot 4)
+//   -[NSFileManager contentsOfDirectoryAtPath:error:] (slot 5)
+//   -[UIApplication canOpenURL:]                   (slot 6)
+//   -[BSHasApp cekL3Int:]                          (slot 7 via rh_record_method)
 
 #define RH_HOOKED_METHOD_MAX 8
 static Method  s_rh_methods[RH_HOOKED_METHOD_MAX];
