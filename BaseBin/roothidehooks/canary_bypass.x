@@ -760,6 +760,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 Method m_logCekL3 = class_getInstanceMethod(bsLogCek, @selector(cekL3Int:));
                 if (m_logCekL3) {
                     IMP oldLogCekL3Imp = method_setImplementation(m_logCekL3, (IMP)replaced_cekL3Int);
+                    (void)oldLogCekL3Imp;
                     RH_LOG("cekL3Int: -[BSLogCek cekL3Int:] hooked imp=%p", (void *)oldLogCekL3Imp);
                 } else {
                     RH_LOG("cekL3Int: BSLogCek found but cekL3Int: method MISSING");
