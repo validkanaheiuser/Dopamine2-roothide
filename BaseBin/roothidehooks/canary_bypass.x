@@ -6,6 +6,7 @@
 #include <stdarg.h>
 #include <dlfcn.h>
 #include <pthread.h>
+#include <stdlib.h>
 
 // RHHIDE_DEBUG: define at compile time (-DRHHIDE_DEBUG) to enable OS-log diagnostics.
 // Production builds must NOT define it: RASP tools (ZDefend, BlueShield) call
@@ -558,6 +559,30 @@ static Class replaced_NSClassFromString(NSString *aClassName) {
     return result;
 }
 
+// ─── BSZInspection.apply call-through trampoline ─────────────────────────────
+static IMP s_bsz_apply_orig = NULL;
+
+// ─── Diagnostic: objc_getClass hook (RHHIDE_DEBUG only) ──────────────────────
+// Reveals what ObjC class names BlueShield/BSZInspection probes for via
+// SCP_StrDeobf. Only installed in RHHIDE_DEBUG builds — too noisy/slow for
+// production. Caller-filtered to blueshield.framework via dladdr; the +0x<offset>
+// can be cross-referenced directly in IDA (r82q, file base 0x0).
+#ifdef RHHIDE_DEBUG
+static Class (*orig_objc_getClass_fn)(const char *name) = NULL;
+static Class replaced_objc_getClass_fn(const char *name) {
+    Class result = orig_objc_getClass_fn(name);
+    Dl_info dl;
+    void *ret = __builtin_return_address(0);
+    if (dladdr(ret, &dl) && dl.dli_fname && strstr(dl.dli_fname, "blueshield")) {
+        RH_LOG("objc_getClass[bs +0x%lx]: %s -> %s",
+               (unsigned long)((char *)ret - (char *)dl.dli_fbase),
+               name ?: "(nil)",
+               result ? "(found)" : "(nil)");
+    }
+    return result;
+}
+#endif
+
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
     RH_LOG("logScanBypassInit called (build: " RHHOOKS_VERSION ")");
@@ -769,6 +794,42 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 } else {
                     RH_LOG("BSZInspection: checkZimFrameworkInternal: method MISSING");
                 }
+#ifdef RHHIDE_DEBUG
+                // enumerate all instance methods — reveals selectors beyond checkZimFrameworkInternal:
+                {
+                    unsigned int mc = 0;
+                    Method *ms = class_copyMethodList(bsZInspection, &mc);
+                    RH_LOG("BSZInspection: %u instance methods", mc);
+                    for (unsigned int i = 0; i < mc; i++) {
+                        RH_LOG("  BSZInspection[%u]: %s imp=%p", i,
+                               sel_getName(method_getName(ms[i])),
+                               (void *)method_getImplementation(ms[i]));
+                    }
+                    if (ms) free(ms);
+                }
+#endif
+                // ── Also hook BSZInspection.apply → log entry/exit ────────────────
+                // checkZimFrameworkInternal: already returns NO; calling through to
+                // the original apply is safe. Logging confirms whether apply runs at
+                // all before detection fires, and what the state machine produces.
+                {
+                    Method m_bsza = class_getInstanceMethod(bsZInspection,
+                                                            @selector(apply));
+                    if (m_bsza) {
+                        s_bsz_apply_orig = method_setImplementation(m_bsza,
+                            imp_implementationWithBlock(^(id _self) {
+                                RH_LOG("BSZInspection.apply: ENTRY");
+                                if (s_bsz_apply_orig)
+                                    ((void (*)(id, SEL))s_bsz_apply_orig)(
+                                        _self, @selector(apply));
+                                RH_LOG("BSZInspection.apply: EXIT");
+                            }));
+                        RH_LOG("BSZInspection.apply: hooked imp=%p",
+                               (void *)s_bsz_apply_orig);
+                    } else {
+                        RH_LOG("BSZInspection: apply method MISSING");
+                    }
+                }
             } else {
                 RH_LOG("BSZInspection class NOT FOUND");
             }
@@ -796,5 +857,14 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 RH_LOG("cekL3Int: BSLogCek class NOT FOUND");
             }
         }
+#ifdef RHHIDE_DEBUG
+        // ── Debug: hook objc_getClass → log all BlueShield class lookups ─────────
+        // Installed after all other hooks so we don't log our own init-time lookups.
+        // Caller-filtered: only logs calls from within blueshield.framework.
+        MSHookFunction((void *)objc_getClass,
+                       (void *)replaced_objc_getClass_fn,
+                       (void **)&orig_objc_getClass_fn);
+        RH_LOG("objc_getClass hooked (BlueShield call tracer)");
+#endif
     }
 }
