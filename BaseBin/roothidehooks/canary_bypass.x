@@ -567,42 +567,35 @@ static Class replaced_NSClassFromString(NSString *aClassName) {
 // ─── BSZInspection.apply call-through trampoline ─────────────────────────────
 static IMP s_bsz_apply_orig = NULL;
 
-// ─── openURL:options:completionHandler: threat-redirect callstack capture ─────
+// ─── openURL:options:completionHandler: Promon Shield / BlueShield redirect block
 //
-// When BlueShield fires a threat response it calls:
+// IDA-verified (2qvw / mobilebankingx.framework = Promon Shield):
+//   +[PRMShieldEventManager load] (0x82C45C) → sub_75680 → sub_73430 →
+//   sub_6A358 (160KB CFF state machine; reads dyld_all_image_infos directly,
+//   detects roothide/ellekit injection → MOV W0,#4 at 0x71B44) →
+//   sub_2E4400 (calls UIApplicationMain + schedules dispatch_async block) →
+//   dispatch_main_queue_callback_4CF fires sub_2E582C (block invoke) →
+//   sub_2E505C (URL builder + openURL caller at 0x2E556C) →
 //   [[UIApplication sharedApplication] openURL:threatURL
-//                                       options:@{} completionHandler:nil]
-// where threatURL = https://pro-threats.nbowree.com/threats?reason={4|5}
+//                                       options:@{} completionHandler:block]
+//   where threatURL = https://pro-threats.nbowree.com/threats?reason=4...
 //
-// The "all hooks installed, none ever fires before detection" pattern in c0444b6
-// (zero contentsOfDirectoryAtPath, BSZInspection.apply, cekL3Int, canOpenURL)
-// indicates BlueShield's +load constructor at 0x64428 (363 instructions, CFF)
-// performs an early integrity check — potentially scanning Mach-O headers for
-// hooked memory regions — and reaches the threat URL path WITHOUT going through
-// checkTrustedEnv's normal checker chain (MC1, BSHasApp, BSLogCek, etc.).
+// Root cause of crash (production): this hook was RHHIDE_DEBUG-only. Without it,
+// openURL fires, Safari opens, Promon's completion block receives YES → calls
+// exit(). RHHIDE_DEBUG log (bshield-1.log) confirmed: when handler(NO) is
+// returned, the completion block receives NO and does NOT call exit — the app
+// survives (NSClassFromString calls continue at lines 361+ after BLOCKED).
 //
-// This hook: (RHHIDE_DEBUG only)
-//   1. Detects the nbowree/reason= redirect URL
-//   2. Prints URL + 30-frame callstack to OS log
-//   3. BLOCKS the redirect (keeps the process alive so subsequent log lines remain)
-//
-// The callstack will show exactly which BlueShield function invoked openURL —
-// whether it is from the +load constructor (0x64428 path), from checkTrustedEnv
-// (checker class path), or from somewhere else. Cross-reference the printed
-// addresses against IDA r82q (file base 0x0) to identify the trigger.
-//
-// NEVER enable in production (RHHIDE_DEBUG=0): callstack strings go to OS log,
-// which BlueShield's BSLogCek / cekL3Int scan for bypass evidence.
-#ifdef RHHIDE_DEBUG
+// Production: silently call handler(NO), no RH_LOG. BSLogCek/cekL3Int scan the
+// OS log for [RHHIDE] strings — any log entry reveals the bypass is active.
 static IMP s_orig_openURL_opts = NULL;
 
 static void replaced_openURL_opts(id self, SEL sel, NSURL *url,
                                   NSDictionary *opts, void(^handler)(BOOL))
 {
     NSString *urlStr = [url absoluteString];
-    if (urlStr && ([urlStr containsString:@"nbowree"] ||
-                   [urlStr containsString:@"reason=5"] ||
-                   [urlStr containsString:@"reason=4"])) {
+    if (urlStr && [urlStr containsString:@"nbowree"]) {
+#ifdef RHHIDE_DEBUG
         RH_LOG("THREAT_REDIRECT BLOCKED url=%s", [urlStr UTF8String]);
         NSArray *stack = [NSThread callStackSymbols];
         NSUInteger lim = MIN([stack count], 30U);
@@ -610,13 +603,28 @@ static void replaced_openURL_opts(id self, SEL sel, NSURL *url,
             RH_LOG("THREAT_STACK[%02lu]: %s", (unsigned long)i,
                    [[stack objectAtIndex:i] UTF8String]);
         }
+#endif
         if (handler) handler(NO);
         return;
     }
     ((void (*)(id, SEL, NSURL *, NSDictionary *, void(^)(BOOL)))s_orig_openURL_opts)(
         self, sel, url, opts, handler);
 }
-#endif
+
+// ─── Promon Shield sub_6A358 (core detection CFF engine) no-op hook ─────────
+//
+// IDA-verified (2qvw): sub_6A358 at file offset 0x6A358 is the 160KB CFF state
+// machine that:
+//   (a) reads dyld_all_image_infos directly — bypasses all Fix B API hooks, and
+//   (b) calls sub_2E4400(4, data) at 0x71B48 when it finds injected dylibs.
+//
+// Returning 0 immediately prevents the entire detection loop from running.
+// We never call orig_promon_scanner / orig_promon_scanner2 — that is intentional.
+static intptr_t (*orig_promon_scanner)(intptr_t, intptr_t, intptr_t, intptr_t) = NULL;
+static intptr_t (*orig_promon_scanner2)(intptr_t, intptr_t, intptr_t, intptr_t) = NULL;
+static intptr_t replaced_promon_scanner(intptr_t a1, intptr_t a2, intptr_t a3, intptr_t a4) {
+    return 0;
+}
 
 // ─── Diagnostic: objc_getClass hook (RHHIDE_DEBUG only) ──────────────────────
 // Reveals what ObjC class names BlueShield/BSZInspection probes for via
@@ -963,27 +971,66 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 RH_LOG("MC1 metaclass NOT FOUND");
             }
         }
-#ifdef RHHIDE_DEBUG
-        // ── openURL:options:completionHandler: threat redirect capture ────────────
-        // Intercepts the BlueShield threat-URL open to: (a) log the URL + 30-frame
-        // callstack (cross-reference addresses against IDA r82q file-base 0x0), and
-        // (b) block the redirect so the process stays alive for further log analysis.
-        // Must be installed BEFORE the objc_getClass tracer so its installation calls
-        // (objc_getClass("UIApplication")) are NOT logged by the tracer.
+        // ── Hook openURL:options:completionHandler: → block nbowree redirects ──────
+        // Promon Shield fires reason=4 before BlueShield's checkTrustedEnv ever
+        // runs. sub_2E4400 schedules sub_2E582C on _dispatch_main_q; when the
+        // block fires it calls sub_2E505C which calls openURL with the nbowree URL.
+        // Returning handler(NO) prevents Promon's completion block from calling
+        // exit(). Production: no RH_LOG (BSLogCek can find no bypass evidence).
+        // Installed before the objc_getClass tracer so UIApplication lookup is quiet.
         {
             Class uiAppCls = objc_getClass("UIApplication");
             if (uiAppCls) {
-                SEL openURLSel = @selector(openURL:options:completionHandler:);
-                Method m_ouo = class_getInstanceMethod(uiAppCls, openURLSel);
+                Method m_ouo = class_getInstanceMethod(uiAppCls,
+                                    @selector(openURL:options:completionHandler:));
                 if (m_ouo) {
                     s_orig_openURL_opts = method_setImplementation(
                         m_ouo, (IMP)replaced_openURL_opts);
-                    RH_LOG("openURL:opts:handler: hooked for threat redirect capture");
+                    RH_LOG("openURL:opts:handler: hooked (Promon/nbowree redirect block)");
                 } else {
                     RH_LOG("openURL:opts:handler: method MISSING");
                 }
             }
         }
+        // ── Hook Promon Shield sub_6A358 → no-op ─────────────────────────────────
+        // sub_6A358 (mobilebankingx.framework file offset 0x6A358) reads
+        // dyld_all_image_infos directly (bypassing Fix B API hooks) and calls
+        // sub_2E4400(4, ...) when it detects roothideinit.dylib / roothidehooks.dylib
+        // / libellekit.dylib. Hook it to return 0 immediately.
+        // Base computed via dladdr on the +[PRMShieldEventManager load] IMP, which
+        // lives in mobilebankingx's __TEXT. Installed before +load fires.
+        {
+            Class prmCls = objc_getClass("PRMShieldEventManager");
+            if (prmCls) {
+                Method loadM = class_getClassMethod(prmCls, @selector(load));
+                if (loadM) {
+                    IMP loadImp = method_getImplementation(loadM);
+                    Dl_info dlInfo = {0};
+                    if (dladdr((void*)loadImp, &dlInfo) && dlInfo.dli_fbase) {
+                        uintptr_t base = (uintptr_t)dlInfo.dli_fbase;
+                        // Hook 1: sub_6A358 — CFF engine A, dispatches reason=4 at 0x71B48
+                        void *target = (void*)(base + 0x6A358);
+                        MSHookFunction(target, (void*)replaced_promon_scanner,
+                                       (void**)&orig_promon_scanner);
+                        RH_LOG("Promon sub_6A358 hooked base=%p target=%p",
+                               (void*)base, target);
+                        // Hook 2: sub_4F1DE8 — CFF engine B, also dispatches reason=4 at 0x4F7ED4.
+                        // IDA-verified: same prologue/structure as sub_6A358, same module pattern,
+                        // also called via function pointer from Promon's module system.
+                        void *target2 = (void*)(base + 0x4F1DE8);
+                        MSHookFunction(target2, (void*)replaced_promon_scanner,
+                                       (void**)&orig_promon_scanner2);
+                        RH_LOG("Promon sub_4F1DE8 hooked base=%p target=%p",
+                               (void*)base, target2);
+                    } else {
+                        RH_LOG("Promon sub_6A358/sub_4F1DE8: dladdr failed");
+                    }
+                } else {
+                    RH_LOG("Promon sub_6A358: PRMShieldEventManager +load MISSING");
+                }
+            }
+        }
+#ifdef RHHIDE_DEBUG
         // ── Debug: hook objc_getClass → log all non-nil class lookups ────────────
         // Caller filter removed (see comment in replaced_objc_getClass_fn above).
         // Installed LAST so we don't log our own init-time objc_getClass calls above.
