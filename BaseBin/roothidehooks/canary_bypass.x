@@ -622,6 +622,7 @@ static void replaced_openURL_opts(id self, SEL sel, NSURL *url,
 // We never call orig_promon_scanner / orig_promon_scanner2 — that is intentional.
 static intptr_t (*orig_promon_scanner)(intptr_t, intptr_t, intptr_t, intptr_t) = NULL;
 static intptr_t (*orig_promon_scanner2)(intptr_t, intptr_t, intptr_t, intptr_t) = NULL;
+static intptr_t (*orig_promon_scanner3)(intptr_t, intptr_t, intptr_t, intptr_t) = NULL;
 static intptr_t replaced_promon_scanner(intptr_t a1, intptr_t a2, intptr_t a3, intptr_t a4) {
     return 0;
 }
@@ -1022,11 +1023,20 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                                        (void**)&orig_promon_scanner2);
                         RH_LOG("Promon sub_4F1DE8 hooked base=%p target=%p",
                                (void*)base, target2);
+                        // Hook 3: sub_27B1A8 — CFF engine C, dispatches reason=5 at 0x27BE04.
+                        // IDA-verified (2qvw): single call to sub_2E4400(5,...) at 0x27BE04.
+                        // Called from sub_70ACA8 (direct BL at 0x70ACF0) and also stored as
+                        // function pointer in sub_4FC800. Runtime log confirmed firing (bshield-1.log).
+                        void *target3 = (void*)(base + 0x27B1A8);
+                        MSHookFunction(target3, (void*)replaced_promon_scanner,
+                                       (void**)&orig_promon_scanner3);
+                        RH_LOG("Promon sub_27B1A8 hooked base=%p target=%p",
+                               (void*)base, target3);
                     } else {
-                        RH_LOG("Promon sub_6A358/sub_4F1DE8: dladdr failed");
+                        RH_LOG("Promon sub_6A358/sub_4F1DE8/sub_27B1A8: dladdr failed");
                     }
                 } else {
-                    RH_LOG("Promon sub_6A358: PRMShieldEventManager +load MISSING");
+                    RH_LOG("Promon engines: PRMShieldEventManager +load MISSING");
                 }
             }
         }
