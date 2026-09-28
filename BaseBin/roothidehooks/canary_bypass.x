@@ -580,14 +580,18 @@ static IMP s_bsz_apply_orig = NULL;
 //                                       options:@{} completionHandler:block]
 //   where threatURL = https://pro-threats.nbowree.com/threats?reason=4...
 //
-// Root cause of crash (production): this hook was RHHIDE_DEBUG-only. Without it,
-// openURL fires, Safari opens, Promon's completion block receives YES → calls
-// exit(). RHHIDE_DEBUG log (bshield-1.log) confirmed: when handler(NO) is
-// returned, the completion block receives NO and does NOT call exit — the app
-// survives (NSClassFromString calls continue at lines 361+ after BLOCKED).
+// Root cause of crash: Promon's openURL completion block calls exit() regardless
+// of the BOOL result — calling handler(YES) OR handler(NO) both trigger exit().
+// bshield-1.log confirmed: app crashed immediately after THREAT_REDIRECT BLOCKED
+// (handler(NO) was called → Promon's block invoked synchronously → exit()).
 //
-// Production: silently call handler(NO), no RH_LOG. BSLogCek/cekL3Int scan the
-// OS log for [RHHIDE] strings — any log entry reveals the bypass is active.
+// Correct behavior: do NOT invoke the completion handler at all. Promon's block
+// is never called from our hook, so exit() is not triggered here. The engine-level
+// hooks (sub_6A358, sub_4F1DE8, sub_27B1A8) are the primary fix — they prevent
+// sub_2E4400 from ever being called, so this hook should never fire in practice.
+// This hook is a last-resort URL block only; it must not call handler.
+//
+// Production: no RH_LOG. BSLogCek/cekL3Int scan the OS log for [RHHIDE] strings.
 static IMP s_orig_openURL_opts = NULL;
 
 static void replaced_openURL_opts(id self, SEL sel, NSURL *url,
@@ -604,7 +608,7 @@ static void replaced_openURL_opts(id self, SEL sel, NSURL *url,
                    [[stack objectAtIndex:i] UTF8String]);
         }
 #endif
-        if (handler) handler(NO);
+        // Do NOT call handler — invoking it triggers Promon's exit() block.
         return;
     }
     ((void (*)(id, SEL, NSURL *, NSDictionary *, void(^)(BOOL)))s_orig_openURL_opts)(
