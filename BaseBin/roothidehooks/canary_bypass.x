@@ -655,6 +655,39 @@ static Class replaced_objc_getClass_fn(const char *name) {
 }
 #endif
 
+// ── TCBRetail BShield: sub_E970 NULL-safe replacement ────────────────────────
+//
+// build-info.framework's InitFunc_0 (0x33AF8) is a __mod_init_func constructor
+// that runs before main(). On jailbreak it deliberately passes NULL into
+// sub_E970 (0xE970) to trigger a crash: sub_E970 reads *(BYTE *)(a1 + 0x80)
+// → NULL + 0x80 = 0x80 → SIGSEGV / KERN_INVALID_ADDRESS.
+//
+// IDA-verified (instance onol, v4.0.28 SHA256-identical to v4.0.27):
+//   sub_E970 = 9 instructions / 36 bytes (safely > 16-byte MSHook trampoline).
+//   OLLVM NOP watermarks at entry:
+//     e970: MOV X16, X16  = 0xAA1003F0  ← first-instruction guard in hook
+//     e974: MOV X17, X17
+//   Crash instruction at +0x14:
+//     e984: LDRB W8, [X8, #0x80]  ← imageOffset 59780 in crash logs
+//
+// Crash chain (confirmed in both -032544 and -032546 crash logs):
+//   InitFunc_0 (build-info+0x33AF8) → +0xC8 → sub_343F0 → sub_C795C
+//   → sub_40D734 (contains call at 0x40D7A8) → sub_E970(NULL) → SIGSEGV
+//
+// Fix: hook sub_E970 with NULL-safe replacement. When a1=NULL return 0
+// ("flag not set" = safe/clean). Non-NULL path inlines the original 1-liner
+// so the function behaves identically on clean devices.
+//
+// Installed in logScanBypassInit() which runs inside systemhook.dylib's
+// constructor — BEFORE build-info.framework's InitFunc_0 (DYLD_INSERT_LIBRARIES
+// dylibs initialize before static LC_LOAD_DYLIB deps per dyld4 bottom-up ordering).
+// Build-info base found via dladdr on getShieldCode IMP (same binary, 0x1615C).
+static int replaced_build_info_sub_E970(void *a1)
+{
+    if (!a1) return 0;
+    return *((unsigned char *)a1 + 128) & 1;
+}
+
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
     RH_LOG("logScanBypassInit called (build: " RHHOOKS_VERSION ")");
@@ -927,6 +960,65 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
             } else {
                 RH_LOG("cekL3Int: BSLogCek class NOT FOUND");
+            }
+        }
+        // ── TCBRetail BShield: hook sub_E970 (constructor kill mechanism) ──────────
+        // See replaced_build_info_sub_E970 comment above for full analysis.
+        // Must be installed before build-info's InitFunc_0 runs (and it is, since
+        // logScanBypassInit runs in systemhook.dylib's constructor — before static deps).
+        // Base address found via dladdr on getShieldCode IMP (build-info offset 0x1615C).
+        {
+            Class shieldMeta = objc_getMetaClass("ShieldAPI");
+            if (shieldMeta) {
+                IMP gscImp = class_getMethodImplementation(shieldMeta,
+                                                           @selector(getShieldCode));
+                if (gscImp) {
+                    Dl_info dl;
+                    if (dladdr((void *)gscImp, &dl) && dl.dli_fbase) {
+                        void *sub_e970 = (char *)dl.dli_fbase + 0xE970;
+                        uint32_t first_insn = *(uint32_t *)sub_e970;
+                        if (first_insn == 0xAA1003F0U) {
+                            MSHookFunction(sub_e970,
+                                           (void *)replaced_build_info_sub_E970,
+                                           NULL);
+                            RH_LOG("build-info sub_E970 NULL guard hooked (constructor kill fix)");
+                        } else {
+                            RH_LOG("build-info sub_E970 insn=0x%08x mismatch, skip", first_insn);
+                        }
+                    } else {
+                        RH_LOG("build-info sub_E970 dladdr failed");
+                    }
+                }
+            }
+        }
+        // ── TCBRetail: Hook +[ShieldAPI getShieldCode] → 0 ──────────────────────
+        // build-info.framework IS BShield RASP Core v2.7.0 (7.7 MB, camouflaged).
+        // +[ShieldAPI getShieldCode] at build-info:0x1615C (IDA instance 4ru6) is the
+        // sole result aggregator: it calls sub_19546C (CFF state machine) which runs
+        // 9 detection modules including:
+        //   Code 508: Dopamine direct (/.jbroot, roothideinit.dylib, dopamine)
+        //   Code 306: RootHide redirection (/dev/fakevar, .jbroot symlink)
+        //   Code 302: Injected dylibs
+        // Returning 0 prevents sub_19546C from running at all and returns Xqcode=0
+        // (clean) for the server's ECDSA-verified Xqcode+Xqsig pair.
+        // Class "ShieldAPI" and selector "getShieldCode" are confirmed plaintext in the
+        // decrypted binary's ObjC metadata (idc.get_name(0x1615C) == "+[ShieldAPI getShieldCode]").
+        // No rh_record_method: TCBRetail has no RuntimeHookChecker (MBRaspSdk absent).
+        {
+            Class shieldAPIMeta = objc_getMetaClass("ShieldAPI");
+            if (shieldAPIMeta) {
+                Method m_gsc = class_getInstanceMethod(shieldAPIMeta,
+                                                       @selector(getShieldCode));
+                if (m_gsc) {
+                    method_setImplementation(m_gsc, imp_implementationWithBlock(
+                        ^int(id _cls) {
+                            return 0;
+                        }
+                    ));
+                    RH_LOG("ShieldAPI.getShieldCode: hooked → 0 (TCBRetail BShield)");
+                } else {
+                    RH_LOG("ShieldAPI.getShieldCode: method MISSING");
+                }
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
