@@ -1415,8 +1415,9 @@ void roothide_init_with_executable(const char* executable)
 	// objc_getClass is safe here: all static-dep ObjC classes (including
 	// BSDPMRHide and ZDefend) are registered by libobjc during dyld image-map,
 	// before any DYLD_INSERT_LIBRARIES constructor executes.
-	bool isRaspApp = (objc_getClass("BSDPMRHide") != NULL   // BlueShield (LienViet)
-	               || objc_getClass("ZDefend")     != NULL); // Zimperium z9 (VPBank)
+	bool isRaspApp = (objc_getClass("BSDPMRHide") != NULL   // BlueShield (LienViet, MBBank)
+	               || objc_getClass("ZDefend")     != NULL   // Zimperium z9 (VPBank)
+	               || objc_getClass("ShieldAPI")   != NULL); // BShield RASP (TCBRetail)
 	if (isRemovableBundlePath(executable) && (jbclient_blacklist_check_pid(getpid()) || isRaspApp)) {
 		gShouldHideJailbreak = true;  // activates Fix B (dyld image-list filter)
 		RH_LOG("ACTIVATED pid=%d exe=%s rasp=%d", getpid(), executable, (int)isRaspApp);

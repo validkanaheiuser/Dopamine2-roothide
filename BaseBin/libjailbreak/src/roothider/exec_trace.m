@@ -147,6 +147,15 @@ static void* exception_server(void* arg)
                     {
                         if(roothide_patch_proc(pid) != 0) {
                             JBLogError("roothide_patch_proc failed for pid=%d, %s\n", pid, proc_get_path(pid,NULL));
+                            // P_TRACED was set by ptrace(PT_ATTACHEXC) and must be cleared
+                            // before the process is unblocked, regardless of patch outcome.
+                            // Without this, P_TRACED=0x800 survives into the new process image
+                            // and BShield (build-info sub_ED38) adds it to the ChaCha20 S-Box,
+                            // corrupting the decryption key → Poly1305 MAC failure → NULL → crash.
+                            int detach_ret = ptrace(PT_DETACH, pid, NULL, 0);
+                            if(detach_ret != 0) {
+                                JBLogError("PT_DETACH (fallback) error for pid=%d: %d, %s\n", pid, errno, strerror(errno));
+                            }
                             finish_process_trace(trace_data, false);
                             trace_data = NULL;
                             break;

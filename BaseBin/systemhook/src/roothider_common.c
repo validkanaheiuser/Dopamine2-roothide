@@ -164,13 +164,16 @@ int __sysctl_hook(int *name, u_int namelen, void *oldp, size_t *oldlenp, const v
 	// reads kinfo_proc then checks kp_proc.p_flag & P_SELECT (0x40) at buf+0x20.
 	// P_SELECT is set transiently while any thread is in select(); clear it so the
 	// check always returns clean.
+	// BShield build-info sub_ED38: same call, reads kp_proc.p_flag & P_TRACED (0x800).
+	// If set, adds 0x800 into ChaCha20 S-Box values → corrupts decryption key →
+	// Poly1305 MAC fails → database not loaded → NULL ptr → crash on Dopamine.
 	if(name && namelen == 4 &&
 	   name[0] == CTL_KERN &&
 	   name[1] == KERN_PROC &&
 	   name[2] == KERN_PROC_PID) {
 		int ret = syscall__sysctl(name, namelen, oldp, oldlenp, newp, newlen);
 		if(ret == 0 && oldp && oldlenp && *oldlenp >= (size_t)(0x20 + sizeof(int))) {
-			*(int *)((char *)oldp + 0x20) &= ~0x40;  /* clear P_SELECT from kp_proc.p_flag */
+			*(int *)((char *)oldp + 0x20) &= ~0x840; /* clear P_SELECT (0x40) + P_TRACED (0x800) from kp_proc.p_flag */
 		}
 		return ret;
 	}
