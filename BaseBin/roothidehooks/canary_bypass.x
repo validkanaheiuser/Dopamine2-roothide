@@ -7,6 +7,7 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <sys/sysctl.h>
 
 // RHHIDE_DEBUG: define at compile time (-DRHHIDE_DEBUG) to enable OS-log diagnostics.
 // Production builds must NOT define it: RASP tools (ZDefend, BlueShield) call
@@ -656,9 +657,59 @@ static Class replaced_objc_getClass_fn(const char *name) {
 #endif
 
 
+// ─── BShield P_TRACED bypass: sysctl hook ────────────────────────────────────
+//
+// build-info.framework InitFunc_0 → sub_ED38 (AEAD decryptor, offset 0xED38):
+//   reads kp_proc.p_flag via sysctl([CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()])
+//   If P_TRACED (0x800) is set → adds 0x800 to ChaCha20 S-Box entries → Poly1305
+//   MAC fails → Master Database returns empty → sub_9F2E8 throws → sub_40D734
+//   catches with exception handler → sub_2ABD0 dereferences uninitialized stack slot
+//   → returns NULL → sub_E970(NULL) → LDRB W8,[X8,#0x80] → SIGSEGV at 0x80.
+//
+// Why MSHookFunction on sysctl (not litehook on __sysctl):
+//   build-info imports _sysctl (1 underscore, libsystem_c.dylib via libSystem.B.dylib
+//   re-export) at GOT 0x71e088. The sub_2559F8 dispatch-table builder loads this
+//   pointer at 0x255abc; the actual call to sysctl() goes through libsystem_c.
+//   litehook patches __sysctl (2 underscores, libsystem_kernel.dylib). On arm64e,
+//   __sysctl is a 16-byte / 4-instruction stub — litehook cannot insert a trampoline
+//   (needs ≥5 instructions) and fails silently; the "sysctl hooks installed" log
+//   message in systemhook appears even on failure because the return value is not
+//   checked. MSHookFunction on sysctl() (libsystem_c, much larger) writes a proper
+//   trampoline. Any call to sysctl() — including the one from sub_ED38 — is intercepted.
+//
+// Deployment note: this hook lives in roothidehooks.dylib, which is a tweak updated
+// via `make package` + Sileo install. It does NOT require rebuilding BaseBin or
+// re-jailbreaking, making it deployable without modifying systemhook.dylib or jailbreakd.
+static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp,
+                          const void *newp, size_t newlen) = NULL;
+
+static int replaced_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
+                            const void *newp, size_t newlen)
+{
+    if (!orig_sysctl)
+        return -1;
+
+    int ret = orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
+    if (ret == 0 && name && namelen == 4 &&
+        name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_PID) {
+        if (oldp && oldlenp && *oldlenp >= (size_t)(0x20 + sizeof(int))) {
+            int *p_flag = (int *)((char *)oldp + 0x20);
+            RH_LOG("sysctl(KERN_PROC_PID) p_flag 0x%x -> 0x%x",
+                   *p_flag, *p_flag & ~0x840);
+            *p_flag &= ~0x840; // clear P_SELECT (0x40) and P_TRACED (0x800)
+        }
+    }
+    return ret;
+}
+
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
     RH_LOG("logScanBypassInit called (build: " RHHOOKS_VERSION ")");
+
+    // build-info queries sysctl from its constructor; install this before the
+    // other RASP hooks so the first KERN_PROC_PID query is covered.
+    MSHookFunction((void *)sysctl, (void *)replaced_sysctl, (void **)&orig_sysctl);
+    RH_LOG("sysctl hook installed (orig=%p)", (void *)orig_sysctl);
 
     // ── RuntimeHookChecker bypass: install method_getImplementation hook first ──
     // Only needed for MBV Bank: _TtC9MBRaspSdk18RuntimeHookChecker (in MBRaspSdk)
