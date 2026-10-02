@@ -664,6 +664,10 @@ static int64_t replaced_buildinfo_sub_40D734(void) {
     return 0;
 }
 
+static void replaced_tcbretail_noop(void) {
+    // No-op to safely skip broken/swizzling +load routines in TCBRetail
+}
+
 // Version-agnostic Pattern Scanner (finds byte signature in Mach-O __TEXT segment)
 static void *find_pattern_in_image(void *base, size_t fallback_max, const uint8_t *pat, size_t pat_len) {
     if (!base || !pat || pat_len == 0) return NULL;
@@ -1143,6 +1147,17 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
             }
 
+            Class uiVcCls = objc_getClass("UIViewController");
+            if (uiVcCls) {
+                Method m_uivc_load = class_getClassMethod(uiVcCls, @selector(load));
+                if (m_uivc_load) {
+                    method_setImplementation(m_uivc_load, imp_implementationWithBlock(^(id _cls) {
+                        RH_LOG("UIViewController(APMScreenClassName).load intercepted (no-op)");
+                    }));
+                    RH_LOG("UIViewController.load hooked");
+                }
+            }
+
             Class afUtilsMeta = objc_getMetaClass("AppsFlyerUtils");
             if (afUtilsMeta) {
                 Method m_jb = class_getInstanceMethod(afUtilsMeta, @selector(isJailbrokenWithSkipAdvancedJailbreakValidation:));
@@ -1158,6 +1173,15 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             const struct mach_header *mainHeader = _dyld_get_image_header(0);
             if (mainHeader) {
                 uintptr_t main_base = (uintptr_t)mainHeader;
+
+                // Hook all +load methods in TCBRetail directly to prevent PAC / GULSwizzler crashes
+                hook_function_abs((void *)(main_base + 0x17CAB4), (void *)replaced_tcbretail_noop); // UIViewController(APMScreenClassName) +load
+                hook_function_abs((void *)(main_base + 0x1873C4), (void *)replaced_tcbretail_noop); // TAGManager +load
+                hook_function_abs((void *)(main_base + 0x1873C8), (void *)replaced_tcbretail_noop); // TAGManager subscribeToAppNotifications
+                hook_function_abs((void *)(main_base + 0x114364), (void *)replaced_tcbretail_noop); // APMMeasurement +load
+                hook_function_abs((void *)(main_base + 0xD4F14), (void *)replaced_tcbretail_noop);  // FIRAnalyticsConnector +load
+                hook_function_abs((void *)(main_base + 0xDA780), (void *)replaced_tcbretail_noop);  // APMAnalytics +load
+                RH_LOG("TCBRetail: all 5 +load methods safely neutralized");
                 // Fix all 21 libdispatch stubs in TCBRetail __la_symbol_ptr
                 *(void **)(main_base + 0xE67B08) = (void *)dispatch_once;
                 *(void **)(main_base + 0xE67B10) = (void *)dispatch_once_f;
