@@ -1143,6 +1143,18 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
             }
 
+            Class afUtilsMeta = objc_getMetaClass("AppsFlyerUtils");
+            if (afUtilsMeta) {
+                Method m_jb = class_getInstanceMethod(afUtilsMeta, @selector(isJailbrokenWithSkipAdvancedJailbreakValidation:));
+                if (m_jb) {
+                    method_setImplementation(m_jb, imp_implementationWithBlock(^BOOL(id _cls, BOOL skip) {
+                        RH_LOG("AppsFlyerUtils.isJailbrokenWithSkipAdvancedJailbreakValidation: intercepted -> NO");
+                        return NO;
+                    }));
+                    RH_LOG("AppsFlyerUtils.isJailbrokenWithSkipAdvancedJailbreakValidation: hooked");
+                }
+            }
+
             const struct mach_header *mainHeader = _dyld_get_image_header(0);
             if (mainHeader) {
                 uintptr_t main_base = (uintptr_t)mainHeader;
@@ -1191,7 +1203,73 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 hook_function_abs((void *)(main_base + 0xBB83F8), (void *)dispatch_get_global_queue);
                 hook_function_abs((void *)(main_base + 0xBB8404), (void *)dispatch_time);
                 hook_function_abs((void *)(main_base + 0xBB8410), (void *)dispatch_after);
-                RH_LOG("TCBRetail: all 21 dispatch stubs fixed at main_base=%p", (void *)main_base);
+
+                // Fix Foundation, Security, SystemConfiguration & UIKit stubs
+                void *fn_nsClassFromString = (void *)NSClassFromString;
+                void *fn_nsLog = (void *)NSLog;
+                void *fn_nsLogv = (void *)NSLogv;
+                void *fn_nsSearchPath = (void *)NSSearchPathForDirectoriesInDomains;
+                void *fn_nsSelectorFromString = (void *)NSSelectorFromString;
+                void *fn_nsStringFromSelector = (void *)NSStringFromSelector;
+                void *fn_scReachCreate = dlsym(RTLD_DEFAULT, "SCNetworkReachabilityCreateWithName");
+                void *fn_scReachSetCb = dlsym(RTLD_DEFAULT, "SCNetworkReachabilitySetCallback");
+                void *fn_scReachSetQ = dlsym(RTLD_DEFAULT, "SCNetworkReachabilitySetDispatchQueue");
+                void *fn_secDelete = dlsym(RTLD_DEFAULT, "SecItemDelete");
+                void *fn_secCopy = dlsym(RTLD_DEFAULT, "SecItemCopyMatching");
+                void *fn_secAdd = dlsym(RTLD_DEFAULT, "SecItemAdd");
+                void *fn_secUpdate = dlsym(RTLD_DEFAULT, "SecItemUpdate");
+                void *fn_uiBeginImg = dlsym(RTLD_DEFAULT, "UIGraphicsBeginImageContextWithOptions");
+                void *fn_uiGetImg = dlsym(RTLD_DEFAULT, "UIGraphicsGetImageFromCurrentImageContext");
+                void *fn_uiEndImg = dlsym(RTLD_DEFAULT, "UIGraphicsEndImageContext");
+                void *fn_uiGetCtx = dlsym(RTLD_DEFAULT, "UIGraphicsGetCurrentContext");
+                void *fn_blockCopy = dlsym(RTLD_DEFAULT, "_Block_copy");
+                void *fn_blockRel = dlsym(RTLD_DEFAULT, "_Block_release");
+                void *fn_dladdr = (void *)dladdr;
+
+                if (fn_nsClassFromString) *(void **)(main_base + 0xE675D8) = fn_nsClassFromString;
+                if (fn_nsLog) *(void **)(main_base + 0xE675E0) = fn_nsLog;
+                if (fn_nsLogv) *(void **)(main_base + 0xE675E8) = fn_nsLogv;
+                if (fn_nsSearchPath) *(void **)(main_base + 0xE675F0) = fn_nsSearchPath;
+                if (fn_nsSelectorFromString) *(void **)(main_base + 0xE675F8) = fn_nsSelectorFromString;
+                if (fn_nsStringFromSelector) *(void **)(main_base + 0xE67608) = fn_nsStringFromSelector;
+                if (fn_scReachCreate) *(void **)(main_base + 0xE67618) = fn_scReachCreate;
+                if (fn_scReachSetCb) *(void **)(main_base + 0xE67620) = fn_scReachSetCb;
+                if (fn_scReachSetQ) *(void **)(main_base + 0xE67628) = fn_scReachSetQ;
+                if (fn_secDelete) *(void **)(main_base + 0xE67638) = fn_secDelete;
+                if (fn_secCopy) *(void **)(main_base + 0xE67640) = fn_secCopy;
+                if (fn_secAdd) *(void **)(main_base + 0xE67648) = fn_secAdd;
+                if (fn_secUpdate) *(void **)(main_base + 0xE67650) = fn_secUpdate;
+                if (fn_uiBeginImg) *(void **)(main_base + 0xE67680) = fn_uiBeginImg;
+                if (fn_uiGetImg) *(void **)(main_base + 0xE67690) = fn_uiGetImg;
+                if (fn_uiEndImg) *(void **)(main_base + 0xE67698) = fn_uiEndImg;
+                if (fn_uiGetCtx) *(void **)(main_base + 0xE676A0) = fn_uiGetCtx;
+                if (fn_blockCopy) *(void **)(main_base + 0xE676B8) = fn_blockCopy;
+                if (fn_blockRel) *(void **)(main_base + 0xE676C0) = fn_blockRel;
+                if (fn_dladdr) *(void **)(main_base + 0xE67BD0) = fn_dladdr;
+
+                // Also hook directly in __stubs for maximum safety
+                if (fn_nsClassFromString) hook_function_abs((void *)(main_base + 0xBB7B1C), fn_nsClassFromString);
+                if (fn_nsLog) hook_function_abs((void *)(main_base + 0xBB7B28), fn_nsLog);
+                if (fn_nsLogv) hook_function_abs((void *)(main_base + 0xBB7B34), fn_nsLogv);
+                if (fn_nsSearchPath) hook_function_abs((void *)(main_base + 0xBB7B40), fn_nsSearchPath);
+                if (fn_nsSelectorFromString) hook_function_abs((void *)(main_base + 0xBB7B4C), fn_nsSelectorFromString);
+                if (fn_nsStringFromSelector) hook_function_abs((void *)(main_base + 0xBB7B64), fn_nsStringFromSelector);
+                if (fn_scReachCreate) hook_function_abs((void *)(main_base + 0xBB7B7C), fn_scReachCreate);
+                if (fn_scReachSetCb) hook_function_abs((void *)(main_base + 0xBB7B88), fn_scReachSetCb);
+                if (fn_scReachSetQ) hook_function_abs((void *)(main_base + 0xBB7B94), fn_scReachSetQ);
+                if (fn_secDelete) hook_function_abs((void *)(main_base + 0xBB7BAC), fn_secDelete);
+                if (fn_secCopy) hook_function_abs((void *)(main_base + 0xBB7BB8), fn_secCopy);
+                if (fn_secAdd) hook_function_abs((void *)(main_base + 0xBB7BC4), fn_secAdd);
+                if (fn_secUpdate) hook_function_abs((void *)(main_base + 0xBB7BD0), fn_secUpdate);
+                if (fn_uiBeginImg) hook_function_abs((void *)(main_base + 0xBB7C18), fn_uiBeginImg);
+                if (fn_uiGetImg) hook_function_abs((void *)(main_base + 0xBB7C30), fn_uiGetImg);
+                if (fn_uiEndImg) hook_function_abs((void *)(main_base + 0xBB7C3C), fn_uiEndImg);
+                if (fn_uiGetCtx) hook_function_abs((void *)(main_base + 0xBB7C48), fn_uiGetCtx);
+                if (fn_blockCopy) hook_function_abs((void *)(main_base + 0xBB7C6C), fn_blockCopy);
+                if (fn_blockRel) hook_function_abs((void *)(main_base + 0xBB7C78), fn_blockRel);
+                if (fn_dladdr) hook_function_abs((void *)(main_base + 0xBB841C), fn_dladdr);
+
+                RH_LOG("TCBRetail: extended Foundation/Security/SystemConfiguration stubs mapped and fixed at main_base=%p", (void *)main_base);
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
