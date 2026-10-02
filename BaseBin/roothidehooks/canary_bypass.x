@@ -15,6 +15,7 @@
 #include <sys/mman.h>
 #include <mach/mach.h>
 #include <mach-o/loader.h>
+#include <mach-o/dyld.h>
 
 // RHHIDE_DEBUG: define at compile time (-DRHHIDE_DEBUG) to enable OS-log diagnostics.
 // Production builds must NOT define it: RASP tools (ZDefend, BlueShield) call
@@ -772,32 +773,9 @@ static bool hook_function_abs(void *target, void *replacement) {
     return true;
 }
 
-int __sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, const void *newp, size_t newlen);
-
-static int replaced_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
-                            const void *newp, size_t newlen)
-{
-    int ret = __sysctl(name, namelen, oldp, oldlenp, newp, newlen);
-    if (ret == 0 && name && namelen == 4 &&
-        name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_PID) {
-        if (oldp && oldlenp && *oldlenp >= (size_t)(0x20 + sizeof(int))) {
-            int *p_flag = (int *)((char *)oldp + 0x20);
-            RH_LOG("sysctl(KERN_PROC_PID) p_flag 0x%x -> 0x%x",
-                   *p_flag, *p_flag & ~0x840);
-            *p_flag &= ~0x840;  // clear P_TRACED(0x800)|P_SELECT(0x40)
-        }
-    }
-    return ret;
-}
-
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
     RH_LOG("logScanBypassInit called (build: " RHHOOKS_VERSION ")");
-
-    // build-info queries sysctl from its constructor; install this before the
-    // other RASP hooks so the first KERN_PROC_PID query is covered.
-    hook_function_abs((void *)sysctl, (void *)replaced_sysctl);
-    RH_LOG("sysctl hook installed (litestyle)");
 
     // ── RuntimeHookChecker bypass: install method_getImplementation hook first ──
     // Only needed for MBV Bank: _TtC9MBRaspSdk18RuntimeHookChecker (in MBRaspSdk)
@@ -1147,6 +1125,41 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 } else {
                     RH_LOG("ShieldAPI.getShieldCode: method MISSING");
                 }
+            }
+
+            // ── TCBRetail: Fix missing libdispatch stubs & TAGManager in main binary ──
+            // On iOS 15.3, dyld binds stripped lazy dispatch stubs in TCBRetail to
+            // _dyld_missing_symbol_abort, crashing in +[TAGManager subscribeToAppNotifications].
+            // Fix: intercept +[TAGManager subscribeToAppNotifications] and populate
+            // __la_symbol_ptr dispatch entries directly.
+            Class tagManagerMeta = objc_getMetaClass("TAGManager");
+            if (tagManagerMeta) {
+                Method m_sub = class_getInstanceMethod(tagManagerMeta, @selector(subscribeToAppNotifications));
+                if (m_sub) {
+                    method_setImplementation(m_sub, imp_implementationWithBlock(^(id _cls) {
+                        RH_LOG("TAGManager.subscribeToAppNotifications intercepted (no-op)");
+                    }));
+                    RH_LOG("TAGManager.subscribeToAppNotifications hooked");
+                }
+            }
+
+            const struct mach_header *mainHeader = _dyld_get_image_header(0);
+            if (mainHeader) {
+                uintptr_t main_base = (uintptr_t)mainHeader;
+                // Fix dispatch stubs in TCBRetail __la_symbol_ptr
+                *(void **)(main_base + 0xE67B48) = (void *)dispatch_semaphore_create;
+                *(void **)(main_base + 0xE67B50) = (void *)dispatch_semaphore_signal;
+                *(void **)(main_base + 0xE67B58) = (void *)dispatch_semaphore_wait;
+                *(void **)(main_base + 0xE67B60) = (void *)dispatch_sync;
+                *(void **)(main_base + 0xE67B68) = (void *)dispatch_async;
+                *(void **)(main_base + 0xE67BA0) = (void *)dispatch_time;
+
+                // Also hook stubs directly in __stubs via hook_function_abs
+                hook_function_abs((void *)(main_base + 0xBB8380), (void *)dispatch_semaphore_create);
+                hook_function_abs((void *)(main_base + 0xBB838C), (void *)dispatch_semaphore_signal);
+                hook_function_abs((void *)(main_base + 0xBB8398), (void *)dispatch_semaphore_wait);
+                hook_function_abs((void *)(main_base + 0xBB8404), (void *)dispatch_time);
+                RH_LOG("TCBRetail: dispatch stubs fixed at main_base=%p", (void *)main_base);
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
