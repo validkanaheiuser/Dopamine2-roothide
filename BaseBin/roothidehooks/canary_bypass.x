@@ -7,9 +7,13 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include <unistd.h>
 #include <sys/sysctl.h>
 #include <sys/syscall.h>
 #include <sys/mman.h>
+#include <mach/mach.h>
 
 // RHHIDE_DEBUG: define at compile time (-DRHHIDE_DEBUG) to enable OS-log diagnostics.
 // Production builds must NOT define it: RASP tools (ZDefend, BlueShield) call
@@ -719,6 +723,8 @@ static Class replaced_objc_getClass_fn(const char *name) {
 // Write LDR X16,[PC+8]; BR X16; .quad addr to target's first 16 bytes.
 static bool hook_function_abs(void *target, void *replacement) {
     uintptr_t t = (uintptr_t)target;
+    size_t ps = getpagesize();
+    if (ps == 0) ps = 0x4000;
 
     uint32_t patch[4] = {
         0x58000050u,                                // LDR X16, [PC+8]
@@ -727,10 +733,10 @@ static bool hook_function_abs(void *target, void *replacement) {
         (uint32_t)(((uintptr_t)replacement) >> 32), // high 32 bits
     };
 
-    uintptr_t page = t & ~(uintptr_t)(PAGE_SIZE - 1);
-    size_t map_size = PAGE_SIZE;
-    if ((t & (PAGE_SIZE - 1)) + sizeof(patch) > PAGE_SIZE)
-        map_size += PAGE_SIZE;
+    uintptr_t page = t & ~(uintptr_t)(ps - 1);
+    size_t map_size = ps;
+    if ((t & (ps - 1)) + sizeof(patch) > ps)
+        map_size += ps;
 
     if (mprotect((void *)page, map_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
         RH_LOG("hook_function_abs: mprotect RWX errno=%d", errno);
