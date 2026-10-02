@@ -1146,20 +1146,52 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             const struct mach_header *mainHeader = _dyld_get_image_header(0);
             if (mainHeader) {
                 uintptr_t main_base = (uintptr_t)mainHeader;
-                // Fix dispatch stubs in TCBRetail __la_symbol_ptr
+                // Fix all 21 libdispatch stubs in TCBRetail __la_symbol_ptr
+                *(void **)(main_base + 0xE67B08) = (void *)dispatch_once;
+                *(void **)(main_base + 0xE67B10) = (void *)dispatch_once_f;
+                *(void **)(main_base + 0xE67B18) = (void *)dispatch_queue_create;
+                *(void **)(main_base + 0xE67B20) = (void *)dispatch_queue_get_label;
+                *(void **)(main_base + 0xE67B28) = (void *)dispatch_get_specific;
+                *(void **)(main_base + 0xE67B30) = (void *)dispatch_queue_set_specific;
+                *(void **)(main_base + 0xE67B38) = (void *)dispatch_source_create;
+                *(void **)(main_base + 0xE67B40) = (void *)dispatch_source_set_timer;
                 *(void **)(main_base + 0xE67B48) = (void *)dispatch_semaphore_create;
                 *(void **)(main_base + 0xE67B50) = (void *)dispatch_semaphore_signal;
                 *(void **)(main_base + 0xE67B58) = (void *)dispatch_semaphore_wait;
                 *(void **)(main_base + 0xE67B60) = (void *)dispatch_sync;
                 *(void **)(main_base + 0xE67B68) = (void *)dispatch_async;
+                *(void **)(main_base + 0xE67B70) = (void *)dispatch_source_set_event_handler;
+                *(void **)(main_base + 0xE67B78) = (void *)dispatch_resume;
+                *(void **)(main_base + 0xE67B80) = (void *)dispatch_suspend;
+                *(void **)(main_base + 0xE67B88) = (void *)dispatch_source_cancel;
+                *(void **)(main_base + 0xE67B90) = (void *)dispatch_source_testcancel;
+                *(void **)(main_base + 0xE67B98) = (void *)dispatch_get_global_queue;
                 *(void **)(main_base + 0xE67BA0) = (void *)dispatch_time;
+                *(void **)(main_base + 0xE67BA8) = (void *)dispatch_after;
 
                 // Also hook stubs directly in __stubs via hook_function_abs
+                hook_function_abs((void *)(main_base + 0xBB8320), (void *)dispatch_once);
+                hook_function_abs((void *)(main_base + 0xBB832C), (void *)dispatch_once_f);
+                hook_function_abs((void *)(main_base + 0xBB8338), (void *)dispatch_queue_create);
+                hook_function_abs((void *)(main_base + 0xBB8344), (void *)dispatch_queue_get_label);
+                hook_function_abs((void *)(main_base + 0xBB8350), (void *)dispatch_get_specific);
+                hook_function_abs((void *)(main_base + 0xBB835C), (void *)dispatch_queue_set_specific);
+                hook_function_abs((void *)(main_base + 0xBB8368), (void *)dispatch_source_create);
+                hook_function_abs((void *)(main_base + 0xBB8374), (void *)dispatch_source_set_timer);
                 hook_function_abs((void *)(main_base + 0xBB8380), (void *)dispatch_semaphore_create);
                 hook_function_abs((void *)(main_base + 0xBB838C), (void *)dispatch_semaphore_signal);
                 hook_function_abs((void *)(main_base + 0xBB8398), (void *)dispatch_semaphore_wait);
+                hook_function_abs((void *)(main_base + 0xBB83A4), (void *)dispatch_sync);
+                hook_function_abs((void *)(main_base + 0xBB83B0), (void *)dispatch_async);
+                hook_function_abs((void *)(main_base + 0xBB83BC), (void *)dispatch_source_set_event_handler);
+                hook_function_abs((void *)(main_base + 0xBB83C8), (void *)dispatch_resume);
+                hook_function_abs((void *)(main_base + 0xBB83D4), (void *)dispatch_suspend);
+                hook_function_abs((void *)(main_base + 0xBB83E0), (void *)dispatch_source_cancel);
+                hook_function_abs((void *)(main_base + 0xBB83EC), (void *)dispatch_source_testcancel);
+                hook_function_abs((void *)(main_base + 0xBB83F8), (void *)dispatch_get_global_queue);
                 hook_function_abs((void *)(main_base + 0xBB8404), (void *)dispatch_time);
-                RH_LOG("TCBRetail: dispatch stubs fixed at main_base=%p", (void *)main_base);
+                hook_function_abs((void *)(main_base + 0xBB8410), (void *)dispatch_after);
+                RH_LOG("TCBRetail: all 21 dispatch stubs fixed at main_base=%p", (void *)main_base);
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
