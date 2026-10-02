@@ -664,10 +664,6 @@ static int64_t replaced_buildinfo_sub_40D734(void) {
     return 0;
 }
 
-static void replaced_tcbretail_noop(void) {
-    // No-op to safely skip broken/swizzling +load routines in TCBRetail
-}
-
 // Version-agnostic Pattern Scanner (finds byte signature in Mach-O __TEXT segment)
 static void *find_pattern_in_image(void *base, size_t fallback_max, const uint8_t *pat, size_t pat_len) {
     if (!base || !pat || pat_len == 0) return NULL;
@@ -1147,17 +1143,6 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
             }
 
-            Class uiVcCls = objc_getClass("UIViewController");
-            if (uiVcCls) {
-                Method m_uivc_load = class_getClassMethod(uiVcCls, @selector(load));
-                if (m_uivc_load) {
-                    method_setImplementation(m_uivc_load, imp_implementationWithBlock(^(id _cls) {
-                        RH_LOG("UIViewController(APMScreenClassName).load intercepted (no-op)");
-                    }));
-                    RH_LOG("UIViewController.load hooked");
-                }
-            }
-
             Class afUtilsMeta = objc_getMetaClass("AppsFlyerUtils");
             if (afUtilsMeta) {
                 Method m_jb = class_getInstanceMethod(afUtilsMeta, @selector(isJailbrokenWithSkipAdvancedJailbreakValidation:));
@@ -1174,14 +1159,32 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             if (mainHeader) {
                 uintptr_t main_base = (uintptr_t)mainHeader;
 
-                // Hook all +load methods in TCBRetail directly to prevent PAC / GULSwizzler crashes
-                hook_function_abs((void *)(main_base + 0x17CAB4), (void *)replaced_tcbretail_noop); // UIViewController(APMScreenClassName) +load
-                hook_function_abs((void *)(main_base + 0x1873C4), (void *)replaced_tcbretail_noop); // TAGManager +load
-                hook_function_abs((void *)(main_base + 0x1873C8), (void *)replaced_tcbretail_noop); // TAGManager subscribeToAppNotifications
-                hook_function_abs((void *)(main_base + 0x114364), (void *)replaced_tcbretail_noop); // APMMeasurement +load
-                hook_function_abs((void *)(main_base + 0xD4F14), (void *)replaced_tcbretail_noop);  // FIRAnalyticsConnector +load
-                hook_function_abs((void *)(main_base + 0xDA780), (void *)replaced_tcbretail_noop);  // APMAnalytics +load
-                RH_LOG("TCBRetail: all 5 +load methods safely neutralized");
+                // Fix all 36 libobjc runtime stubs in TCBRetail __la_symbol_ptr and __stubs
+                static const char *objc_sym_names[36] = {
+                    "objc_alloc", "objc_allocWithZone", "objc_autorelease", "objc_autoreleasePoolPop",
+                    "objc_autoreleasePoolPush", "objc_autoreleaseReturnValue", "objc_begin_catch",
+                    "objc_copyWeak", "objc_destroyWeak", "objc_end_catch", "objc_enumerationMutation",
+                    "objc_exception_throw", "objc_getAssociatedObject", "objc_getClass", "objc_getProperty",
+                    "objc_initWeak", "objc_loadWeakRetained", "objc_msgSend", "objc_msgSendSuper2",
+                    "objc_opt_self", "objc_release", "objc_retain", "objc_retainAutorelease",
+                    "objc_retainAutoreleaseReturnValue", "objc_retainAutoreleasedReturnValue",
+                    "_objc_retainBlock", "objc_setAssociatedObject", "objc_setHook_getClass",
+                    "objc_setProperty_atomic", "objc_setProperty_atomic_copy",
+                    "objc_setProperty_nonatomic_copy", "objc_storeStrong", "objc_storeWeak",
+                    "objc_sync_enter", "objc_sync_exit", "objc_unsafeClaimAutoreleasedReturnValue"
+                };
+                for (int i = 0; i < 36; i++) {
+                    void *sym = dlsym(RTLD_DEFAULT, objc_sym_names[i]);
+                    if (!sym && strcmp(objc_sym_names[i], "_objc_retainBlock") == 0) {
+                        sym = dlsym(RTLD_DEFAULT, "objc_retainBlock");
+                        if (!sym) sym = dlsym(RTLD_DEFAULT, "_Block_copy");
+                    }
+                    if (sym) {
+                        *(void **)(main_base + 0xE67D68 + (uintptr_t)i * 8) = sym;
+                        hook_function_abs((void *)(main_base + 0xBB8674 + (uintptr_t)i * 12), sym);
+                    }
+                }
+                RH_LOG("TCBRetail: all 36 libobjc runtime stubs mapped and fixed");
                 // Fix all 21 libdispatch stubs in TCBRetail __la_symbol_ptr
                 *(void **)(main_base + 0xE67B08) = (void *)dispatch_once;
                 *(void **)(main_base + 0xE67B10) = (void *)dispatch_once_f;
