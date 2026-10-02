@@ -8,6 +8,8 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <sys/sysctl.h>
+#include <sys/syscall.h>
+#include <sys/mman.h>
 
 // RHHIDE_DEBUG: define at compile time (-DRHHIDE_DEBUG) to enable OS-log diagnostics.
 // Production builds must NOT define it: RASP tools (ZDefend, BlueShield) call
@@ -632,6 +634,42 @@ static intptr_t replaced_promon_scanner(intptr_t a1, intptr_t a2, intptr_t a3, i
     return 0;
 }
 
+// ─── BShield (build-info.framework) Core RASP & Crash Fix Hooks ───────────────
+//
+// build-info.framework (BShield RASP Core v2.7.0 in TCBRetail):
+//   1. sub_34340 (offset 0x34340): Early integrity check loop inside InitFunc_0.
+//      Bypassing it prevents background checkers from running during library load.
+//   2. sub_E970 (offset 0xE970): Checks *(a1 + 128) & 1. If database pointer a1
+//      is NULL, dereferencing offset 0x80 triggers EXC_BAD_ACCESS (SIGSEGV 11).
+//      Null-guard ensures it safely returns 0 if a1 == NULL.
+//   3. sub_40D734 (offset 0x40D734): Checker 442 function that invokes sub_E970.
+static int64_t replaced_buildinfo_sub_34340(int64_t a1, int64_t a2) {
+    RH_LOG("build-info: sub_34340 bypassed (InitFunc_0 check loop blocked)");
+    return 0;
+}
+
+static uint8_t replaced_buildinfo_sub_E970(void *a1) {
+    if (!a1) return 0;
+    return *(uint8_t *)((uintptr_t)a1 + 128) & 1;
+}
+
+static int64_t replaced_buildinfo_sub_40D734(void) {
+    RH_LOG("build-info: sub_40D734 bypassed (Checker 442 blocked)");
+    return 0;
+}
+
+// Version-agnostic Pattern Scanner (finds byte signature in Mach-O image)
+static void *find_pattern_in_image(void *base, size_t max_scan, const uint8_t *pat, size_t pat_len) {
+    if (!base || !pat || pat_len == 0 || max_scan < pat_len) return NULL;
+    const uint8_t *ptr = (const uint8_t *)base;
+    for (size_t i = 0; i <= max_scan - pat_len; i += 4) { // ARM64 instructions are 4-byte aligned
+        if (memcmp(ptr + i, pat, pat_len) == 0) {
+            return (void *)(ptr + i);
+        }
+    }
+    return NULL;
+}
+
 // ─── Diagnostic: objc_getClass hook (RHHIDE_DEBUG only) ──────────────────────
 // Reveals what ObjC class names BlueShield/BSZInspection probes for via
 // SCP_StrDeobf. Only installed in RHHIDE_DEBUG builds — too noisy/slow for
@@ -661,42 +699,62 @@ static Class replaced_objc_getClass_fn(const char *name) {
 //
 // build-info.framework InitFunc_0 → sub_ED38 (AEAD decryptor, offset 0xED38):
 //   reads kp_proc.p_flag via sysctl([CTL_KERN, KERN_PROC, KERN_PROC_PID, getpid()])
-//   If P_TRACED (0x800) is set → adds 0x800 to ChaCha20 S-Box entries → Poly1305
-//   MAC fails → Master Database returns empty → sub_9F2E8 throws → sub_40D734
-//   catches with exception handler → sub_2ABD0 dereferences uninitialized stack slot
-//   → returns NULL → sub_E970(NULL) → LDRB W8,[X8,#0x80] → SIGSEGV at 0x80.
+//   If P_TRACED (0x800) is set → corrupts ChaCha20 S-Box → Poly1305 MAC fails
+//   → Master Database empty → sub_9F2E8 throws → var_1A0 uninit → sub_E970(NULL)
+//   → LDRB W8,[X8,#0x80] → SIGSEGV at 0x80.
 //
-// Why MSHookFunction on sysctl (not litehook on __sysctl):
-//   build-info imports _sysctl (1 underscore, libsystem_c.dylib via libSystem.B.dylib
-//   re-export) at GOT 0x71e088. The sub_2559F8 dispatch-table builder loads this
-//   pointer at 0x255abc; the actual call to sysctl() goes through libsystem_c.
-//   litehook patches __sysctl (2 underscores, libsystem_kernel.dylib). On arm64e,
-//   __sysctl is a 16-byte / 4-instruction stub — litehook cannot insert a trampoline
-//   (needs ≥5 instructions) and fails silently; the "sysctl hooks installed" log
-//   message in systemhook appears even on failure because the return value is not
-//   checked. MSHookFunction on sysctl() (libsystem_c, much larger) writes a proper
-//   trampoline. Any call to sysctl() — including the one from sub_ED38 — is intercepted.
-//
-// Deployment note: this hook lives in roothidehooks.dylib, which is a tweak updated
-// via `make package` + Sileo install. It does NOT require rebuilding BaseBin or
-// re-jailbreaking, making it deployable without modifying systemhook.dylib or jailbreakd.
-static int (*orig_sysctl)(int *name, u_int namelen, void *oldp, size_t *oldlenp,
-                          const void *newp, size_t newlen) = NULL;
+// Hook mechanism: inline 4-instruction absolute trampoline (litehook pattern).
+//   MSHookFunction (ElleKit) FAILS: it allocates a new JIT executable page for the
+//   trampoline thunk. vm_allocate+vm_protect(EXEC) → pmap_enter failure because
+//   TCBRetail has no JIT entitlement. Confirmed: build 3cb46bf pid=1110, ktriageinfo
+//   ×5 pmap_enter failures; "sysctl hook installed" logged but replaced_sysctl never
+//   called (ElleKit sets orig before the page-alloc attempt, so orig is non-NULL).
+//   litehook (used by systemhook for hook_access/fork/csops) writes only to EXISTING
+//   shared cache code pages via mprotect — no new executable page needed. Dopamine's
+//   kernel patches allow mprotect(RWX) on shared cache pages. sysctl is in
+//   libsystem_c.dylib (dyld shared cache, hundreds of instructions → hookable).
+//   replaced_sysctl calls syscall(SYS_sysctl,...) directly — same pattern as
+//   __sysctl_hook in roothider_common.c — no trampoline back to original needed.
+
+// Write LDR X16,[PC+8]; BR X16; .quad addr to target's first 16 bytes.
+static bool hook_function_abs(void *target, void *replacement) {
+    uintptr_t t = (uintptr_t)target;
+
+    uint32_t patch[4] = {
+        0x58000050u,                                // LDR X16, [PC+8]
+        0xD61F0200u,                                // BR X16
+        (uint32_t)((uintptr_t)replacement),         // low 32 bits of replacement addr
+        (uint32_t)(((uintptr_t)replacement) >> 32), // high 32 bits
+    };
+
+    uintptr_t page = t & ~(uintptr_t)(PAGE_SIZE - 1);
+    size_t map_size = PAGE_SIZE;
+    if ((t & (PAGE_SIZE - 1)) + sizeof(patch) > PAGE_SIZE)
+        map_size += PAGE_SIZE;
+
+    if (mprotect((void *)page, map_size, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+        RH_LOG("hook_function_abs: mprotect RWX errno=%d", errno);
+        return false;
+    }
+    __asm__ volatile("dmb ishst" ::: "memory");
+    memcpy((void *)t, patch, sizeof(patch));
+    __builtin___clear_cache((char *)t, (char *)(t + sizeof(patch)));
+    __asm__ volatile("dsb ish\n\tisb" ::: "memory");
+    mprotect((void *)page, map_size, PROT_READ | PROT_EXEC);
+    return true;
+}
 
 static int replaced_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
                             const void *newp, size_t newlen)
 {
-    if (!orig_sysctl)
-        return -1;
-
-    int ret = orig_sysctl(name, namelen, oldp, oldlenp, newp, newlen);
+    int ret = (int)syscall(SYS_sysctl, name, namelen, oldp, oldlenp, newp, newlen);
     if (ret == 0 && name && namelen == 4 &&
         name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_PID) {
         if (oldp && oldlenp && *oldlenp >= (size_t)(0x20 + sizeof(int))) {
             int *p_flag = (int *)((char *)oldp + 0x20);
             RH_LOG("sysctl(KERN_PROC_PID) p_flag 0x%x -> 0x%x",
                    *p_flag, *p_flag & ~0x840);
-            *p_flag &= ~0x840; // clear P_SELECT (0x40) and P_TRACED (0x800)
+            *p_flag &= ~0x840;  // clear P_TRACED(0x800)|P_SELECT(0x40)
         }
     }
     return ret;
@@ -708,8 +766,8 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
 
     // build-info queries sysctl from its constructor; install this before the
     // other RASP hooks so the first KERN_PROC_PID query is covered.
-    MSHookFunction((void *)sysctl, (void *)replaced_sysctl, (void **)&orig_sysctl);
-    RH_LOG("sysctl hook installed (orig=%p)", (void *)orig_sysctl);
+    bool sysctl_hooked = hook_function_abs((void *)sysctl, (void *)replaced_sysctl);
+    RH_LOG("sysctl hook %s", sysctl_hooked ? "OK (litestyle)" : "FAILED");
 
     // ── RuntimeHookChecker bypass: install method_getImplementation hook first ──
     // Only needed for MBV Bank: _TtC9MBRaspSdk18RuntimeHookChecker (in MBRaspSdk)
@@ -981,27 +1039,77 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 RH_LOG("cekL3Int: BSLogCek class NOT FOUND");
             }
         }
-        // ── TCBRetail: Hook +[ShieldAPI getShieldCode] → 0 ──────────────────────
+        // ── TCBRetail: Hook build-info.framework + [ShieldAPI getShieldCode] ────
         // build-info.framework IS BShield RASP Core v2.7.0 (7.7 MB, camouflaged).
-        // +[ShieldAPI getShieldCode] at build-info:0x1615C (IDA instance 4ru6) is the
-        // sole result aggregator: it calls sub_19546C (CFF state machine) which runs
-        // 9 detection modules including:
-        //   Code 508: Dopamine direct (/.jbroot, roothideinit.dylib, dopamine)
-        //   Code 306: RootHide redirection (/dev/fakevar, .jbroot symlink)
-        //   Code 302: Injected dylibs
-        // Returning 0 prevents sub_19546C from running at all and returns Xqcode=0
-        // (clean) for the server's ECDSA-verified Xqcode+Xqsig pair.
-        // Class "ShieldAPI" and selector "getShieldCode" are confirmed plaintext in the
-        // decrypted binary's ObjC metadata (idc.get_name(0x1615C) == "+[ShieldAPI getShieldCode]").
-        // No rh_record_method: TCBRetail has no RuntimeHookChecker (MBRaspSdk absent).
+        // 1. Dynamic pattern scan for sub_34340, sub_E970, and sub_40D734 (version-agnostic)
+        //    to prevent the early static constructor crash during dyld image initialization.
+        // 2. Hook +[ShieldAPI getShieldCode] at build-info:0x1615C to return 0.
         {
             Class shieldAPIMeta = objc_getMetaClass("ShieldAPI");
             if (shieldAPIMeta) {
                 Method m_gsc = class_getInstanceMethod(shieldAPIMeta,
                                                        @selector(getShieldCode));
                 if (m_gsc) {
+                    IMP imp = method_getImplementation(m_gsc);
+                    Dl_info dli = {0};
+                    if (dladdr((void *)imp, &dli) && dli.dli_fbase) {
+                        uintptr_t base = (uintptr_t)dli.dli_fbase;
+                        RH_LOG("build-info framework base found at %p", (void *)base);
+
+                        // Signature 1: sub_E970 (LDRB W8,[X8,#0x80] ; AND W0,W8,#1 ; ADD SP,SP,#0x10 ; RET)
+                        static const uint8_t pat_e970[] = {
+                            0x08, 0x01, 0x42, 0x39, 0x00, 0x01, 0x00, 0x12, 0xff, 0x43, 0x00, 0x91, 0xc0, 0x03, 0x5f, 0xd6
+                        };
+                        void *loc_e970 = find_pattern_in_image((void *)base, 0x500000, pat_e970, sizeof(pat_e970));
+                        if (loc_e970) {
+                            // Target is the start of sub_E970 (20 bytes before LDRB)
+                            void *fn_e970 = (void *)((uintptr_t)loc_e970 - 20);
+                            hook_function_abs(fn_e970, (void *)replaced_buildinfo_sub_E970);
+                            RH_LOG("build-info: sub_E970 dynamic pattern hooked at %p", fn_e970);
+                        } else {
+                            // Fallback to offset 0xE970
+                            hook_function_abs((void *)(base + 0xE970), (void *)replaced_buildinfo_sub_E970);
+                            RH_LOG("build-info: sub_E970 fallback offset hooked at %p", (void *)(base + 0xE970));
+                        }
+
+                        // Signature 2: sub_34340 (Check loop in InitFunc_0)
+                        static const uint8_t pat_34340[] = {
+                            0xff, 0x03, 0x02, 0xd1, 0xfd, 0x7b, 0x07, 0xa9, 0xfd, 0xc3, 0x01, 0x91,
+                            0xa0, 0x83, 0x1f, 0xf8, 0xa1, 0x03, 0x1f, 0xf8, 0xa8, 0x83, 0x5f, 0xf8,
+                            0x00, 0x21, 0x00, 0x91
+                        };
+                        void *loc_34340 = find_pattern_in_image((void *)base, 0x500000, pat_34340, sizeof(pat_34340));
+                        if (loc_34340) {
+                            // Target is the start of sub_34340 (8 bytes before SUB SP,SP,#0x80)
+                            void *fn_34340 = (void *)((uintptr_t)loc_34340 - 8);
+                            hook_function_abs(fn_34340, (void *)replaced_buildinfo_sub_34340);
+                            RH_LOG("build-info: sub_34340 dynamic pattern hooked at %p", fn_34340);
+                        } else {
+                            // Fallback to offset 0x34340
+                            hook_function_abs((void *)(base + 0x34340), (void *)replaced_buildinfo_sub_34340);
+                            RH_LOG("build-info: sub_34340 fallback offset hooked at %p", (void *)(base + 0x34340));
+                        }
+
+                        // Signature 3: sub_40D734 (Checker 442)
+                        static const uint8_t pat_40d734[] = {
+                            0xe8, 0x77, 0x00, 0xf9, 0x48, 0x37, 0x80, 0x52, 0xe8, 0xe3, 0x00, 0xb9
+                        };
+                        void *loc_40d734 = find_pattern_in_image((void *)base, 0x500000, pat_40d734, sizeof(pat_40d734));
+                        if (loc_40d734) {
+                            // Target is start of sub_40D734 (56 bytes before MOV W8,#0x1BA)
+                            void *fn_40d734 = (void *)((uintptr_t)loc_40d734 - 56);
+                            hook_function_abs(fn_40d734, (void *)replaced_buildinfo_sub_40D734);
+                            RH_LOG("build-info: sub_40D734 dynamic pattern hooked at %p", fn_40d734);
+                        } else {
+                            // Fallback to offset 0x40D734
+                            hook_function_abs((void *)(base + 0x40D734), (void *)replaced_buildinfo_sub_40D734);
+                            RH_LOG("build-info: sub_40D734 fallback offset hooked at %p", (void *)(base + 0x40D734));
+                        }
+                    }
+
                     method_setImplementation(m_gsc, imp_implementationWithBlock(
                         ^int(id _cls) {
+                            RH_LOG("ShieldAPI.getShieldCode: intercepted -> return 0");
                             return 0;
                         }
                     ));
