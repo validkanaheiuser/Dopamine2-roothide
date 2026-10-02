@@ -681,8 +681,8 @@ static intptr_t hook__dyld_get_image_vmaddr_slide(uint32_t idx) {
 
 // Static scratch for the filtered dyld_all_image_infos returned by
 // hook__dyld_get_all_image_infos. Written once per call while gShouldHideJailbreak
-// is true; 512 slots cover all realistic app scenarios.
-#define MAX_FILTERED_IMAGES 512
+// is true; 4096 slots cover all large apps (e.g. TCBRetail with ~1000 loaded images).
+#define MAX_FILTERED_IMAGES 4096
 static struct dyld_image_info      g_filtered_image_array[MAX_FILTERED_IMAGES];
 static struct dyld_all_image_infos g_filtered_image_infos;
 
