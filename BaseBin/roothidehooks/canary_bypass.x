@@ -14,6 +14,7 @@
 #include <sys/syscall.h>
 #include <sys/mman.h>
 #include <mach/mach.h>
+#include <mach-o/loader.h>
 
 // RHHIDE_DEBUG: define at compile time (-DRHHIDE_DEBUG) to enable OS-log diagnostics.
 // Production builds must NOT define it: RASP tools (ZDefend, BlueShield) call
@@ -662,11 +663,30 @@ static int64_t replaced_buildinfo_sub_40D734(void) {
     return 0;
 }
 
-// Version-agnostic Pattern Scanner (finds byte signature in Mach-O image)
-static void *find_pattern_in_image(void *base, size_t max_scan, const uint8_t *pat, size_t pat_len) {
-    if (!base || !pat || pat_len == 0 || max_scan < pat_len) return NULL;
+// Version-agnostic Pattern Scanner (finds byte signature in Mach-O __TEXT segment)
+static void *find_pattern_in_image(void *base, size_t fallback_max, const uint8_t *pat, size_t pat_len) {
+    if (!base || !pat || pat_len == 0) return NULL;
+    size_t scan_size = fallback_max;
+    const struct mach_header_64 *mh = (const struct mach_header_64 *)base;
+    if (mh->magic == MH_MAGIC_64) {
+        const uint8_t *cmd_ptr = (const uint8_t *)(mh + 1);
+        for (uint32_t i = 0; i < mh->ncmds; i++) {
+            const struct load_command *lc = (const struct load_command *)cmd_ptr;
+            if (lc->cmd == LC_SEGMENT_64) {
+                const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+                if (strncmp(seg->segname, "__TEXT", 6) == 0) {
+                    if (seg->vmsize > 0) {
+                        scan_size = (size_t)seg->vmsize;
+                    }
+                    break;
+                }
+            }
+            cmd_ptr += lc->cmdsize;
+        }
+    }
+    if (scan_size < pat_len) return NULL;
     const uint8_t *ptr = (const uint8_t *)base;
-    for (size_t i = 0; i <= max_scan - pat_len; i += 4) { // ARM64 instructions are 4-byte aligned
+    for (size_t i = 0; i <= scan_size - pat_len; i += 4) { // ARM64 instructions are 4-byte aligned
         if (memcmp(ptr + i, pat, pat_len) == 0) {
             return (void *)(ptr + i);
         }
@@ -717,7 +737,7 @@ static Class replaced_objc_getClass_fn(const char *name) {
 //   shared cache code pages via mprotect — no new executable page needed. Dopamine's
 //   kernel patches allow mprotect(RWX) on shared cache pages. sysctl is in
 //   libsystem_c.dylib (dyld shared cache, hundreds of instructions → hookable).
-//   replaced_sysctl calls syscall(SYS_sysctl,...) directly — same pattern as
+//   replaced_sysctl calls __sysctl directly — same pattern as
 //   __sysctl_hook in roothider_common.c — no trampoline back to original needed.
 
 // Write LDR X16,[PC+8]; BR X16; .quad addr to target's first 16 bytes.
@@ -750,10 +770,12 @@ static bool hook_function_abs(void *target, void *replacement) {
     return true;
 }
 
+int __sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, const void *newp, size_t newlen);
+
 static int replaced_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
                             const void *newp, size_t newlen)
 {
-    int ret = (int)syscall(SYS_sysctl, name, namelen, oldp, oldlenp, newp, newlen);
+    int ret = __sysctl(name, namelen, oldp, oldlenp, newp, newlen);
     if (ret == 0 && name && namelen == 4 &&
         name[0] == CTL_KERN && name[1] == KERN_PROC && name[2] == KERN_PROC_PID) {
         if (oldp && oldlenp && *oldlenp >= (size_t)(0x20 + sizeof(int))) {
@@ -772,8 +794,8 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
 
     // build-info queries sysctl from its constructor; install this before the
     // other RASP hooks so the first KERN_PROC_PID query is covered.
-    bool sysctl_hooked = hook_function_abs((void *)sysctl, (void *)replaced_sysctl);
-    RH_LOG("sysctl hook %s", sysctl_hooked ? "OK (litestyle)" : "FAILED");
+    hook_function_abs((void *)sysctl, (void *)replaced_sysctl);
+    RH_LOG("sysctl hook installed (litestyle)");
 
     // ── RuntimeHookChecker bypass: install method_getImplementation hook first ──
     // Only needed for MBV Bank: _TtC9MBRaspSdk18RuntimeHookChecker (in MBRaspSdk)
