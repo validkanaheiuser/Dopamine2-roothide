@@ -764,7 +764,9 @@ static bool hook_function_abs(void *target, void *replacement) {
     }
     __asm__ volatile("dmb ishst" ::: "memory");
     memcpy((void *)t, patch, sizeof(patch));
-    __builtin___clear_cache((char *)t, (char *)(t + sizeof(patch)));
+    __asm__ volatile("dc cvau, %0" : : "r"(t) : "memory");
+    __asm__ volatile("dsb ish" ::: "memory");
+    __asm__ volatile("ic ivau, %0" : : "r"(t) : "memory");
     __asm__ volatile("dsb ish\n\tisb" ::: "memory");
     mprotect((void *)page, map_size, PROT_READ | PROT_EXEC);
     return true;
