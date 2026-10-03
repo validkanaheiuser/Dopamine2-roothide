@@ -31,6 +31,8 @@ static inline void rh_log(const char *fmt, ...) {
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     os_log_with_type(OS_LOG_DEFAULT, OS_LOG_TYPE_DEFAULT, "[RHHIDE] %{public}s", buf);
+    fprintf(stderr, "[RHHIDE] %s\n", buf);
+    fflush(stderr);
 }
 #define RH_LOG(fmt, ...) rh_log(fmt, ##__VA_ARGS__)
 #else
