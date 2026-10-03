@@ -1188,7 +1188,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
 
                 // ── Fix critical Global Offset Table (__got) entries ──
                 void *sym_objc_msgSend = (void *)objc_msgSend;
-                void *sym_objc_msgSendSuper2 = (void *)objc_msgSendSuper2;
+                void *sym_objc_msgSendSuper2 = dlsym(RTLD_DEFAULT, "objc_msgSendSuper2");
                 void *sym_setHook_getClass = dlsym(RTLD_DEFAULT, "objc_setHook_getClass");
                 void *sym_defaultRuneLocale = dlsym(RTLD_DEFAULT, "_DefaultRuneLocale");
                 void *sym_nsConcreteStackBlock = dlsym(RTLD_DEFAULT, "_NSConcreteStackBlock");
