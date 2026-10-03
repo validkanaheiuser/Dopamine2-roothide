@@ -342,6 +342,36 @@ static NSArray *replaced_contentsOfDirectoryAtPath(id self, SEL sel, NSString *p
     return [filtered copy];
 }
 
+static NSArray *(*orig_subpathsOfDirectoryAtPath)(id self, SEL sel, NSString *path, NSError **err) = NULL;
+
+static NSArray *replaced_subpathsOfDirectoryAtPath(id self, SEL sel, NSString *path, NSError **err) {
+    NSArray *result = orig_subpathsOfDirectoryAtPath(self, sel, path, err);
+    RH_LOG("NSFileMgr.subpathsOfDirectoryAtPath: %s count=%d", [path UTF8String] ?: "", (int)[result count]);
+    if (!result || [result count] == 0) return result;
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:[result count]];
+    for (NSString *entry in result) {
+        if (!jailbreakBypassShouldBlockPath(entry)) {
+            [filtered addObject:entry];
+        }
+    }
+    return [filtered copy];
+}
+
+static NSArray *(*orig_subpathsAtPath)(id self, SEL sel, NSString *path) = NULL;
+
+static NSArray *replaced_subpathsAtPath(id self, SEL sel, NSString *path) {
+    NSArray *result = orig_subpathsAtPath(self, sel, path);
+    RH_LOG("NSFileMgr.subpathsAtPath: %s count=%d", [path UTF8String] ?: "", (int)[result count]);
+    if (!result || [result count] == 0) return result;
+    NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:[result count]];
+    for (NSString *entry in result) {
+        if (!jailbreakBypassShouldBlockPath(entry)) {
+            [filtered addObject:entry];
+        }
+    }
+    return [filtered copy];
+}
+
 // ─── ZDefend bypass for VP Bank NEO ──────────────────────────────────────────
 //
 // ZDefend.framework (Zimperium z9 RASP SDK) uses Direct Syscalls (SVC 0x80) for
@@ -692,6 +722,11 @@ static int replaced_d1core_sub_5946CC(void) {
     return 21;
 }
 
+// Universal clean int returner (used for Swift RASP functions)
+static int64_t replaced_clean_int_fn(void) {
+    return 0;
+}
+
 // Version-agnostic Pattern Scanner (finds byte signature in Mach-O __TEXT segment)
 static void *find_pattern_in_image(void *base, size_t fallback_max, const uint8_t *pat, size_t pat_len) {
     if (!base || !pat || pat_len == 0) return NULL;
@@ -934,6 +969,24 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                             (IMP)replaced_contentsOfDirectoryAtPath,
                             (IMP *)&orig_contentsOfDirectoryAtPath);
             rh_record_method(m_coddap, (IMP)orig_contentsOfDirectoryAtPath);
+        }
+        {
+            Method m_soda = class_getInstanceMethod([NSFileManager class],
+                                                    @selector(subpathsOfDirectoryAtPath:error:));
+            MSHookMessageEx([NSFileManager class],
+                            @selector(subpathsOfDirectoryAtPath:error:),
+                            (IMP)replaced_subpathsOfDirectoryAtPath,
+                            (IMP *)&orig_subpathsOfDirectoryAtPath);
+            rh_record_method(m_soda, (IMP)orig_subpathsOfDirectoryAtPath);
+        }
+        {
+            Method m_sa = class_getInstanceMethod([NSFileManager class],
+                                                  @selector(subpathsAtPath:));
+            MSHookMessageEx([NSFileManager class],
+                            @selector(subpathsAtPath:),
+                            (IMP)replaced_subpathsAtPath,
+                            (IMP *)&orig_subpathsAtPath);
+            rh_record_method(m_sa, (IMP)orig_subpathsAtPath);
         }
         // ── Hook UIApplication canOpenURL: → NO for jailbreak tool schemes ───────
         // BSHasApp cekL1Int (blueshield.framework 0x31E6C) queries whether schemes
@@ -1560,7 +1613,13 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                         return @"t54r90";
                     }));
                 }
-                RH_LOG("SmartBanking: [SUCCESS] SecurityPackage GET_IS_JAILBREAK, isDidChangeColor, getColorCode hooked");
+                Method m_secCheckLib = class_getInstanceMethod(secPkgCls, @selector(checklib));
+                if (m_secCheckLib) {
+                    method_setImplementation(m_secCheckLib, imp_implementationWithBlock(^(id _self) {
+                        // no-op (prevents logging Exit1/Exit2/Exit3 analytics)
+                    }));
+                }
+                RH_LOG("SmartBanking: [SUCCESS] SecurityPackage GET_IS_JAILBREAK, isDidChangeColor, getColorCode, checklib hooked");
             }
 
             Class sotpCls = objc_getClass("SOTP");
@@ -1583,7 +1642,25 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                         return @"0";
                     }));
                 }
-                RH_LOG("SmartBanking: [SUCCESS] SOTP isDidChangeColor, isDidChangeColor4, getDtR hooked -> SAFE");
+                Method m_sotpChkLib = class_getInstanceMethod(sotpCls, @selector(checklibIsJB));
+                if (m_sotpChkLib) {
+                    method_setImplementation(m_sotpChkLib, imp_implementationWithBlock(^BOOL(id _self) {
+                        return NO;
+                    }));
+                }
+                Method m_sotpCb = class_getInstanceMethod(sotpCls, @selector(cB));
+                if (m_sotpCb) {
+                    method_setImplementation(m_sotpCb, imp_implementationWithBlock(^BOOL(id _self) {
+                        return NO;
+                    }));
+                }
+                Method m_sotpFindOut = class_getInstanceMethod(sotpCls, @selector(findOut:));
+                if (m_sotpFindOut) {
+                    method_setImplementation(m_sotpFindOut, imp_implementationWithBlock(^(id _self, id path) {
+                        // no-op (prevents recursive scanning of /private/var/)
+                    }));
+                }
+                RH_LOG("SmartBanking: [SUCCESS] SOTP isDidChangeColor, isDidChangeColor4, getDtR, checklibIsJB, cB, findOut hooked -> SAFE");
             }
 
             Class vnbBioCls = objc_getClass("VNBBiometricManager");
@@ -1595,6 +1672,18 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     }));
                     RH_LOG("SmartBanking: [SUCCESS] VNBBiometricManager checkWhetherBiometricsAvailable hooked -> 0");
                 }
+            }
+
+            // Swift combine existence scanners: sub_100095178 and sub_102175484
+            // IDA-verified: these functions return 1 if jailbroken, 0 if safe.
+            if (mainHeader) {
+                uintptr_t main_base = (uintptr_t)mainHeader;
+                void *swift_fn1 = (void *)(main_base + 0x95178);
+                void *swift_fn2 = (void *)(main_base + 0x2175484);
+                // Return 0 (clean)
+                hook_function_abs(swift_fn1, (void *)replaced_clean_int_fn);
+                hook_function_abs(swift_fn2, (void *)replaced_clean_int_fn);
+                RH_LOG("SmartBanking: [SUCCESS] Swift RASP scanners sub_100095178 & sub_102175484 hooked -> 0");
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
