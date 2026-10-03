@@ -219,10 +219,12 @@ static const char *const kJailbreakPathPatterns[] = {
     "/Applications/Sileo.app",     // Sileo package manager
     "/usr/share/zebra/",           // Zebra data directory
     "/Library/MobileSubstrate",    // MobileSubstrate directory
-    "/usr/sbin/sshd",              // OpenSSH daemon
+    "/usr/sbin/",                  // System daemons / sandbox escape test (cfprefsd, sshd)
     "/usr/bin/ssh",                // OpenSSH client
     "/etc/apt",                    // APT configuration directory
     "/bin/bash",                   // Bash shell
+    "/bin/sh",                     // Shell
+    "/etc/ssh/",                   // SSH config directory
     "/private/jailbreak.txt",      // Jailbreak test file
     "/private/jb_test.txt",        // Jailbreak test file
     NULL

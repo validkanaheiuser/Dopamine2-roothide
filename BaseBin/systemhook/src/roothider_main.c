@@ -452,6 +452,10 @@ static const char *const kBlockedPathPatterns[] = {
     "/usr/share/zebra/",        // Zebra data directory (BSZInspection)
     "/Library/MobileSubstrate/",// MobileSubstrate/ElleKit tweak inject path
     "/usr/lib/TweakInject/",    // TweakInject path (alternate substrate path)
+    "/usr/sbin/",               // Daemon path (cfprefsd, sshd, sandbox escape check)
+    "/bin/sh",
+    "/bin/bash",
+    "/etc/ssh/",
     NULL
 };
 
