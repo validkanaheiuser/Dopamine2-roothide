@@ -232,6 +232,11 @@ static bool jailbreakBypassShouldBlockPath(NSString *path) {
     if (!path) return false;
     const char *cpath = [path UTF8String];
     if (!cpath) return false;
+    // If the path contains honeypot / canary suffix (e.g. "/definitely/not/real"), do NOT block via hook;
+    // let orig_fileExistsAtPath check real filesystem (which returns NO because it doesn't exist).
+    if (strstr(cpath, "/definitely/not/real") || strstr(cpath, "Dummy")) {
+        return false;
+    }
     for (int i = 0; kJailbreakPathPatterns[i]; i++) {
         if (strstr(cpath, kJailbreakPathPatterns[i])) return true;
     }
