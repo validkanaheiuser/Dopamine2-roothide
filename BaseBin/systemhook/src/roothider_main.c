@@ -1422,9 +1422,14 @@ void roothide_init_with_executable(const char* executable)
 	               || objc_getClass("ShieldAPI")   != NULL   // BShield RASP (TCBRetail)
 	               || objc_getClass("JailMonkey")  != NULL   // JailMonkey (MSB mBank)
 	               || objc_getClass("D1CCard")     != NULL   // Thales D1 (MSB mBank)
+	               || objc_getClass("CheckJB")     != NULL   // SmartBanking (BIDV)
+	               || objc_getClass("SecurityPackage") != NULL // SmartBanking (BIDV)
+	               || objc_getClass("SOTP")        != NULL   // SmartBanking (BIDV)
 	               || (executable && (strstr(executable, "MSB mBank") != NULL
 	                              || strstr(executable, "com.msb.mobileBanking") != NULL
-	                              || strstr(executable, "TCBRetail") != NULL)));
+	                              || strstr(executable, "TCBRetail") != NULL
+	                              || strstr(executable, "SmartBanking") != NULL
+	                              || strstr(executable, "com.bidv.smartbanking") != NULL)));
 	if (isRemovableBundlePath(executable) && (jbclient_blacklist_check_pid(getpid()) || isRaspApp)) {
 		gShouldHideJailbreak = true;  // activates Fix B (dyld image-list filter)
 		RH_LOG("ACTIVATED pid=%d exe=%s rasp=%d", getpid(), executable, (int)isRaspApp);

@@ -212,10 +212,19 @@ static const char *const kJailbreakPathPatterns[] = {
     "/var/jb/",                    // any /var/jb/ bind-mount path
     "/var/lib/dpkg/",              // dpkg package database (cekL3Int)
     "/var/lib/apt/",               // apt package lists (cekL3Int)
+    "/var/lib/cydia",              // Cydia metadata
+    "/var/tmp/cydia.log",          // Cydia log
     "/Applications/Cydia.app",     // Cydia package manager
     "/Applications/Zebra.app",     // Zebra package manager
     "/Applications/Sileo.app",     // Sileo package manager
     "/usr/share/zebra/",           // Zebra data directory
+    "/Library/MobileSubstrate",    // MobileSubstrate directory
+    "/usr/sbin/sshd",              // OpenSSH daemon
+    "/usr/bin/ssh",                // OpenSSH client
+    "/etc/apt",                    // APT configuration directory
+    "/bin/bash",                   // Bash shell
+    "/private/jailbreak.txt",      // Jailbreak test file
+    "/private/jb_test.txt",        // Jailbreak test file
     NULL
 };
 
@@ -1463,6 +1472,128 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 } else {
                     hook_function_abs((void *)(d1core_base + 0x5946CC), (void *)replaced_d1core_sub_5946CC);
                     RH_LOG("MSB mBank: [SUCCESS] D1Core sub_5946CC fallback offset hooked at %p", (void *)(d1core_base + 0x5946CC));
+                }
+            }
+        }
+
+        // ── SmartBanking (BIDV): Hook CheckJB, SecurityPackage, SOTP, DTT, VNPay ──
+        // IDA-verified (instance imyl):
+        // 1. +[CheckJB checkJB] at 0x1034315e0: checks Cydia, Substrate, sshd, apt, bash -> NO
+        // 2. +[DTTJailbreakDetection isJailbroken] at 0x1021744e0 -> NO
+        // 3. +[VNPACUtility checkJailbreak] at 0x1023c7d44 -> NO
+        // 4. -[UIDevice isJailBreak] / -[UIDevice isJailBroken] -> NO
+        // 5. -[SecurityPackage GET_IS_JAILBREAK] -> @"NOT_JAILBREAK"
+        // 6. -[SecurityPackage isDidChangeColor] -> NO
+        // 7. -[SecurityPackage getColorCode] -> @"t54r90" (clean code; "9879dsjkdfds" is jailbreak)
+        // 8. -[SOTP isDidChangeColor] / -[SOTP isDidChangeColor4] -> NO
+        // 9. -[SOTP getDeviceStatus] -> @"1"
+        // 10. -[SOTP getDtR] -> @"0"
+        // 11. -[VNBBiometricManager checkWhetherBiometricsAvailable] -> 0 (available)
+        {
+            Class checkJBMeta = objc_getMetaClass("CheckJB");
+            if (checkJBMeta) {
+                Method m_cjb = class_getInstanceMethod(checkJBMeta, @selector(checkJB));
+                if (m_cjb) {
+                    method_setImplementation(m_cjb, imp_implementationWithBlock(^BOOL(id _cls) {
+                        return NO;
+                    }));
+                    RH_LOG("SmartBanking: [SUCCESS] CheckJB.checkJB hooked -> NO");
+                }
+            }
+
+            Class dttJbMeta = objc_getMetaClass("DTTJailbreakDetection");
+            if (dttJbMeta) {
+                Method m_dtt = class_getInstanceMethod(dttJbMeta, @selector(isJailbroken));
+                if (m_dtt) {
+                    method_setImplementation(m_dtt, imp_implementationWithBlock(^BOOL(id _cls) {
+                        return NO;
+                    }));
+                    RH_LOG("SmartBanking: [SUCCESS] DTTJailbreakDetection.isJailbroken hooked -> NO");
+                }
+            }
+
+            Class vnpAcMeta = objc_getMetaClass("VNPACUtility");
+            if (vnpAcMeta) {
+                Method m_vnp = class_getInstanceMethod(vnpAcMeta, @selector(checkJailbreak));
+                if (m_vnp) {
+                    method_setImplementation(m_vnp, imp_implementationWithBlock(^BOOL(id _cls) {
+                        return NO;
+                    }));
+                    RH_LOG("SmartBanking: [SUCCESS] VNPACUtility.checkJailbreak hooked -> NO");
+                }
+            }
+
+            Class uiDevCls = objc_getClass("UIDevice");
+            if (uiDevCls) {
+                Method m_jb1 = class_getInstanceMethod(uiDevCls, @selector(isJailBreak));
+                if (m_jb1) {
+                    method_setImplementation(m_jb1, imp_implementationWithBlock(^BOOL(id _self) {
+                        return NO;
+                    }));
+                }
+                Method m_jb2 = class_getInstanceMethod(uiDevCls, @selector(isJailBroken));
+                if (m_jb2) {
+                    method_setImplementation(m_jb2, imp_implementationWithBlock(^BOOL(id _self) {
+                        return NO;
+                    }));
+                }
+                RH_LOG("SmartBanking: [SUCCESS] UIDevice isJailBreak/isJailBroken hooked -> NO");
+            }
+
+            Class secPkgCls = objc_getClass("SecurityPackage");
+            if (secPkgCls) {
+                Method m_gijb = class_getInstanceMethod(secPkgCls, @selector(GET_IS_JAILBREAK));
+                if (m_gijb) {
+                    method_setImplementation(m_gijb, imp_implementationWithBlock(^NSString *(id _self) {
+                        return @"NOT_JAILBREAK";
+                    }));
+                }
+                Method m_isChg = class_getInstanceMethod(secPkgCls, @selector(isDidChangeColor));
+                if (m_isChg) {
+                    method_setImplementation(m_isChg, imp_implementationWithBlock(^BOOL(id _self) {
+                        return NO;
+                    }));
+                }
+                Method m_gcc = class_getInstanceMethod(secPkgCls, @selector(getColorCode));
+                if (m_gcc) {
+                    method_setImplementation(m_gcc, imp_implementationWithBlock(^NSString *(id _self) {
+                        return @"t54r90";
+                    }));
+                }
+                RH_LOG("SmartBanking: [SUCCESS] SecurityPackage GET_IS_JAILBREAK, isDidChangeColor, getColorCode hooked");
+            }
+
+            Class sotpCls = objc_getClass("SOTP");
+            if (sotpCls) {
+                Method m_sotpChg = class_getInstanceMethod(sotpCls, @selector(isDidChangeColor));
+                if (m_sotpChg) {
+                    method_setImplementation(m_sotpChg, imp_implementationWithBlock(^BOOL(id _self) {
+                        return NO;
+                    }));
+                }
+                Method m_sotpChg4 = class_getInstanceMethod(sotpCls, @selector(isDidChangeColor4));
+                if (m_sotpChg4) {
+                    method_setImplementation(m_sotpChg4, imp_implementationWithBlock(^BOOL(id _self) {
+                        return NO;
+                    }));
+                }
+                Method m_sotpDtr = class_getInstanceMethod(sotpCls, @selector(getDtR));
+                if (m_sotpDtr) {
+                    method_setImplementation(m_sotpDtr, imp_implementationWithBlock(^NSString *(id _self) {
+                        return @"0";
+                    }));
+                }
+                RH_LOG("SmartBanking: [SUCCESS] SOTP isDidChangeColor, isDidChangeColor4, getDtR hooked -> SAFE");
+            }
+
+            Class vnbBioCls = objc_getClass("VNBBiometricManager");
+            if (vnbBioCls) {
+                Method m_cwba = class_getInstanceMethod(vnbBioCls, @selector(checkWhetherBiometricsAvailable));
+                if (m_cwba) {
+                    method_setImplementation(m_cwba, imp_implementationWithBlock(^NSInteger(id _self) {
+                        return 0;
+                    }));
+                    RH_LOG("SmartBanking: [SUCCESS] VNBBiometricManager checkWhetherBiometricsAvailable hooked -> 0");
                 }
             }
         }
