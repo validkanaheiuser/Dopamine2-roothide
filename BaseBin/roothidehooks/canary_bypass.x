@@ -16,6 +16,7 @@
 #include <mach/mach.h>
 #include <mach-o/loader.h>
 #include <mach-o/dyld.h>
+#include "tcbretail_got.h"
 
 // RHHIDE_DEBUG: define at compile time (-DRHHIDE_DEBUG) to enable OS-log diagnostics.
 // Production builds must NOT define it: RASP tools (ZDefend, BlueShield) call
@@ -1186,32 +1187,37 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
                 RH_LOG("TCBRetail: all 36 libobjc runtime stubs mapped and fixed");
 
-                // ── Fix critical Global Offset Table (__got) entries ──
-                void *sym_objc_msgSend = (void *)objc_msgSend;
-                void *sym_objc_msgSendSuper2 = dlsym(RTLD_DEFAULT, "objc_msgSendSuper2");
-                void *sym_setHook_getClass = dlsym(RTLD_DEFAULT, "objc_setHook_getClass");
-                void *sym_defaultRuneLocale = dlsym(RTLD_DEFAULT, "_DefaultRuneLocale");
-                void *sym_nsConcreteStackBlock = dlsym(RTLD_DEFAULT, "_NSConcreteStackBlock");
-                void *sym_chkstk = dlsym(RTLD_DEFAULT, "___chkstk_darwin");
-                void *sym_stack_chk_guard = dlsym(RTLD_DEFAULT, "__stack_chk_guard");
-                void *sym_stderrp = dlsym(RTLD_DEFAULT, "__stderrp");
-                void *sym_avail = dlsym(RTLD_DEFAULT, "__availability_version_check");
-                void *sym_disp_main_q = dlsym(RTLD_DEFAULT, "_dispatch_main_q");
-                void *sym_disp_timer = dlsym(RTLD_DEFAULT, "_dispatch_source_type_timer");
+                // ── Fix Global Offset Table (__got) entries ──
+                // __got is located in __DATA_CONST which is read-only (r--) by default.
+                // We must unprotect with vm_protect/mprotect before writing to prevent SIGBUS / KERN_PROTECTION_FAILURE.
+                uintptr_t got_start = (main_base + 0xDE0000) & ~((uintptr_t)16383);
+                uintptr_t got_end = ((main_base + 0xDF0000 + 16383) & ~((uintptr_t)16383));
+                size_t got_size = got_end - got_start;
 
-                *(void **)(main_base + 0xDE8E70) = sym_objc_msgSend;
-                *(void **)(main_base + 0xDE8E78) = sym_objc_msgSend;
-                *(void **)(main_base + 0xDE8E80) = sym_objc_msgSendSuper2;
-                if (sym_setHook_getClass) *(void **)(main_base + 0xDE8E88) = sym_setHook_getClass;
-                if (sym_defaultRuneLocale) *(void **)(main_base + 0xDE8E90) = sym_defaultRuneLocale;
-                if (sym_nsConcreteStackBlock) *(void **)(main_base + 0xDE8E98) = sym_nsConcreteStackBlock;
-                if (sym_chkstk) *(void **)(main_base + 0xDE8EA0) = sym_chkstk;
-                if (sym_stack_chk_guard) *(void **)(main_base + 0xDE8EA8) = sym_stack_chk_guard;
-                if (sym_stderrp) *(void **)(main_base + 0xDE8EB0) = sym_stderrp;
-                if (sym_avail) *(void **)(main_base + 0xDE8EB8) = sym_avail;
-                if (sym_disp_main_q) *(void **)(main_base + 0xDE8EC0) = sym_disp_main_q;
-                if (sym_disp_timer) *(void **)(main_base + 0xDE8EC8) = sym_disp_timer;
-                RH_LOG("TCBRetail: critical __got entries (objc_msgSend, _NSConcreteStackBlock, etc.) bound");
+                vm_protect(mach_task_self(), (vm_address_t)got_start, (vm_size_t)got_size, false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
+                mprotect((void *)got_start, got_size, PROT_READ | PROT_WRITE);
+
+                int got_bound = 0;
+                for (size_t i = 0; i < TCBRETAIL_GOT_COUNT; i++) {
+                    const char *name = g_tcbretail_got_entries[i].name;
+                    void *sym = dlsym(RTLD_DEFAULT, name);
+                    if (!sym && name[0] == '_') {
+                        sym = dlsym(RTLD_DEFAULT, name + 1);
+                    }
+                    if (!sym && name[0] == '_' && name[1] == '_') {
+                        sym = dlsym(RTLD_DEFAULT, name + 2);
+                    }
+                    if (!sym && strcmp(name, "_objc_msgSend") == 0) {
+                        sym = (void *)objc_msgSend;
+                    }
+
+                    if (sym) {
+                        *(void **)(main_base + g_tcbretail_got_entries[i].offset) = sym;
+                        got_bound++;
+                    }
+                }
+                mprotect((void *)got_start, got_size, PROT_READ);
+                RH_LOG("TCBRetail: bound %d/%d entries in __got", got_bound, (int)TCBRETAIL_GOT_COUNT);
                 // Fix all 21 libdispatch stubs in TCBRetail __la_symbol_ptr
                 *(void **)(main_base + 0xE67B08) = (void *)dispatch_once;
                 *(void **)(main_base + 0xE67B10) = (void *)dispatch_once_f;
