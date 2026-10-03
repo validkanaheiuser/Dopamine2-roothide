@@ -1404,7 +1404,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                         }));
                     }
                 }
-                RH_LOG("MSB mBank: JailMonkey all methods hooked -> clean");
+                RH_LOG("MSB mBank: [SUCCESS] JailMonkey all 9 detection methods & constantsToExport hooked -> clean");
             }
         }
 
@@ -1417,7 +1417,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     method_setImplementation(m_os, imp_implementationWithBlock(^BOOL(id _cls) {
                         return NO;
                     }));
-                    RH_LOG("OneSignalJailbreakDetection.isJailbroken hooked -> NO");
+                    RH_LOG("MSB mBank: [SUCCESS] OneSignalJailbreakDetection.isJailbroken hooked -> NO");
                 }
             }
         }
@@ -1444,10 +1444,10 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 void *fn_1e9738 = find_pattern_in_image((void *)d1core_base, 0x400000, pat_1e9738, sizeof(pat_1e9738));
                 if (fn_1e9738) {
                     hook_function_abs(fn_1e9738, (void *)replaced_d1core_sub_1E9738);
-                    RH_LOG("D1Core: sub_1E9738 dynamic pattern hooked at %p", fn_1e9738);
+                    RH_LOG("MSB mBank: [SUCCESS] D1Core sub_1E9738 dynamic pattern hooked at %p", fn_1e9738);
                 } else {
                     hook_function_abs((void *)(d1core_base + 0x1E9738), (void *)replaced_d1core_sub_1E9738);
-                    RH_LOG("D1Core: sub_1E9738 fallback offset hooked at %p", (void *)(d1core_base + 0x1E9738));
+                    RH_LOG("MSB mBank: [SUCCESS] D1Core sub_1E9738 fallback offset hooked at %p", (void *)(d1core_base + 0x1E9738));
                 }
 
                 // Signature 2: sub_5946CC (RASP internal integrity checker returning 21 for SAFE)
@@ -1457,10 +1457,10 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 void *fn_5946cc = find_pattern_in_image((void *)d1core_base, 0x700000, pat_5946cc, sizeof(pat_5946cc));
                 if (fn_5946cc) {
                     hook_function_abs(fn_5946cc, (void *)replaced_d1core_sub_5946CC);
-                    RH_LOG("D1Core: sub_5946CC dynamic pattern hooked at %p", fn_5946cc);
+                    RH_LOG("MSB mBank: [SUCCESS] D1Core sub_5946CC dynamic pattern hooked at %p", fn_5946cc);
                 } else {
                     hook_function_abs((void *)(d1core_base + 0x5946CC), (void *)replaced_d1core_sub_5946CC);
-                    RH_LOG("D1Core: sub_5946CC fallback offset hooked at %p", (void *)(d1core_base + 0x5946CC));
+                    RH_LOG("MSB mBank: [SUCCESS] D1Core sub_5946CC fallback offset hooked at %p", (void *)(d1core_base + 0x5946CC));
                 }
             }
         }
@@ -1579,6 +1579,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
             }
         }
+        RH_LOG("logScanBypassInit: [SUCCESS] All security bypasses active (build: %s)", RHHOOKS_VERSION);
 #ifdef RHHIDE_DEBUG
         // ── Debug: hook objc_getClass → log all non-nil class lookups ────────────
         // Caller filter removed (see comment in replaced_objc_getClass_fn above).
