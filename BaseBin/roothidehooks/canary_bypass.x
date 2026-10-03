@@ -1676,8 +1676,9 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
 
             // Swift combine existence scanners: sub_100095178 and sub_102175484
             // IDA-verified: these functions return 1 if jailbroken, 0 if safe.
-            if (mainHeader) {
-                uintptr_t main_base = (uintptr_t)mainHeader;
+            const struct mach_header *sbHeader = _dyld_get_image_header(0);
+            if (sbHeader) {
+                uintptr_t main_base = (uintptr_t)sbHeader;
                 void *swift_fn1 = (void *)(main_base + 0x95178);
                 void *swift_fn2 = (void *)(main_base + 0x2175484);
                 // Return 0 (clean)
