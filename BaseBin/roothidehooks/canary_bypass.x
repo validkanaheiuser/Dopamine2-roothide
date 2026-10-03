@@ -1761,9 +1761,8 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             if (oqzCls) {
                 Method m_vdl = class_getInstanceMethod(oqzCls, @selector(viewDidLoad));
                 if (m_vdl) {
-                    method_setImplementation(m_vdl, imp_implementationWithBlock(^(UIViewController *_self) {
-                        RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10OQZMeL2A9a viewDidLoad intercepted -> dismiss");
-                        [_self dismissViewControllerAnimated:NO completion:nil];
+                    method_setImplementation(m_vdl, imp_implementationWithBlock(^(id _self) {
+                        RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10OQZMeL2A9a viewDidLoad intercepted -> NO-OP");
                     }));
                     RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10OQZMeL2A9a viewDidLoad hooked");
                 }
@@ -1776,22 +1775,24 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 Method m_pvc = class_getInstanceMethod(uiVcCls, @selector(presentViewController:animated:completion:));
                 if (m_pvc) {
                     IMP orig_pvc = method_getImplementation(m_pvc);
-                    method_setImplementation(m_pvc, imp_implementationWithBlock(^(UIViewController *_self, UIViewController *vc, BOOL flag, id completion) {
+                    Class alertCls = objc_getClass("UIAlertController");
+                    method_setImplementation(m_pvc, imp_implementationWithBlock(^(id _self, id vc, BOOL flag, id completion) {
                         if (vc) {
                             NSString *clsName = NSStringFromClass([vc class]);
                             if ([clsName containsString:@"OQZMeL2A9a"] || [clsName containsString:@"VNPShield"]) {
                                 RH_LOG("SmartBanking: [BLOCKED] presentation of %s", [clsName UTF8String]);
-                                if (completion) {
-                                    dispatch_async(dispatch_get_main_queue(), ^{
-                                        ((void (^)(void))completion)();
-                                    });
-                                }
                                 return;
                             }
-                            if ([vc isKindOfClass:[UIAlertController class]]) {
-                                UIAlertController *alert = (UIAlertController *)vc;
-                                NSString *title = alert.title ?: @"";
-                                NSString *message = alert.message ?: @"";
+                            if (alertCls && [vc isKindOfClass:alertCls]) {
+                                NSString *title = @"";
+                                NSString *message = @"";
+                                @try {
+                                    id t = [vc valueForKey:@"title"];
+                                    if ([t isKindOfClass:[NSString class]]) title = t;
+                                    id m = [vc valueForKey:@"message"];
+                                    if ([m isKindOfClass:[NSString class]]) message = m;
+                                } @catch (id ex) {}
+
                                 if ([title containsString:@"b\u1ebb kh\u00f3a"] || [message containsString:@"b\u1ebb kh\u00f3a"] ||
                                     [title containsString:@"Th\u00f4ng t\u01b0 77"] || [message containsString:@"Th\u00f4ng t\u01b0 77"] ||
                                     [title containsString:@"77/2025"] || [message containsString:@"77/2025"] ||
@@ -1800,16 +1801,11 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                                     [title containsString:@"C-2"] || [message containsString:@"C-2"] ||
                                     [title containsString:@"Circular 77"] || [message containsString:@"Circular 77"]) {
                                     RH_LOG("SmartBanking: [BLOCKED] UIAlertController with C-2 / Circular 77 root warning");
-                                    if (completion) {
-                                        dispatch_async(dispatch_get_main_queue(), ^{
-                                            ((void (^)(void))completion)();
-                                        });
-                                    }
                                     return;
                                 }
                             }
                         }
-                        ((void (*)(id, SEL, UIViewController *, BOOL, id))orig_pvc)(_self, @selector(presentViewController:animated:completion:), vc, flag, completion);
+                        ((void (*)(id, SEL, id, BOOL, id))orig_pvc)(_self, @selector(presentViewController:animated:completion:), vc, flag, completion);
                     }));
                     RH_LOG("SmartBanking: [SUCCESS] UIViewController presentViewController:animated:completion: hooked (anti-C2 modal shield)");
                 }
