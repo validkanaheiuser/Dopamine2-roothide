@@ -1197,7 +1197,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 vm_protect(mach_task_self(), (vm_address_t)got_start, (vm_size_t)got_size, false, VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY);
                 mprotect((void *)got_start, got_size, PROT_READ | PROT_WRITE);
 
-                int got_bound = 0;
+                __attribute__((unused)) int got_bound = 0;
                 for (size_t i = 0; i < TCBRETAIL_GOT_COUNT; i++) {
                     const char *name = g_tcbretail_got_entries[i].name;
                     void *sym = dlsym(RTLD_DEFAULT, name);
@@ -1216,6 +1216,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                         got_bound++;
                     }
                 }
+                (void)got_bound;
                 mprotect((void *)got_start, got_size, PROT_READ);
                 RH_LOG("TCBRetail: bound %d/%d entries in __got", got_bound, (int)TCBRETAIL_GOT_COUNT);
                 // Fix all 21 libdispatch stubs in TCBRetail __la_symbol_ptr
