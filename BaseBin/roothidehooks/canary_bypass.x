@@ -665,6 +665,22 @@ static int64_t replaced_buildinfo_sub_40D734(void) {
     return 0;
 }
 
+// ─── D1Core.framework (Thales D1 RASP) Bypasses ──────────────────────────────
+// sub_1E9738: validates RASP status and throws D1CRaspErrorDomain error.
+// Bypassed to return 0 (no error thrown).
+static int64_t replaced_d1core_sub_1E9738(int a1) {
+    RH_LOG("D1Core: sub_1E9738 bypassed (RASP status %d -> clean)", a1);
+    (void)a1;
+    return 0;
+}
+
+// sub_5946CC: internal obfuscated integrity/environment checker.
+// Returns 21 (0x15) which indicates SAFE / Status OK.
+static int replaced_d1core_sub_5946CC(void) {
+    RH_LOG("D1Core: sub_5946CC bypassed -> status SAFE (21)");
+    return 21;
+}
+
 // Version-agnostic Pattern Scanner (finds byte signature in Mach-O __TEXT segment)
 static void *find_pattern_in_image(void *base, size_t fallback_max, const uint8_t *pat, size_t pat_len) {
     if (!base || !pat || pat_len == 0) return NULL;
@@ -1156,8 +1172,9 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
             }
 
+            bool isTCBRetail = (shieldAPIMeta != NULL || tagManagerMeta != NULL);
             const struct mach_header *mainHeader = _dyld_get_image_header(0);
-            if (mainHeader) {
+            if (isTCBRetail && mainHeader) {
                 uintptr_t main_base = (uintptr_t)mainHeader;
 
                 // Fix all 36 libobjc runtime stubs in TCBRetail __la_symbol_ptr and __stubs
@@ -1331,6 +1348,120 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 if (fn_dladdr) hook_function_abs((void *)(main_base + 0xBB841C), fn_dladdr);
 
                 RH_LOG("TCBRetail: extended Foundation/Security/SystemConfiguration stubs mapped and fixed at main_base=%p", (void *)main_base);
+            }
+        }
+
+        // ── MSB mBank: Hook JailMonkey Native Module ─────────────────────────
+        // MSB mBank is built on React Native and uses JailMonkey for client-side
+        // jailbreak, debug, mock location, and sandbox escape detection.
+        // We hook all detection methods directly via method_setImplementation.
+        {
+            Class jailMonkeyCls = objc_getClass("JailMonkey");
+            if (jailMonkeyCls) {
+                SEL jm_bool_selectors[] = {
+                    @selector(isJailBroken),
+                    @selector(isDebugged),
+                    @selector(canFork),
+                    @selector(canViolateSandbox),
+                    @selector(checkPaths),
+                    @selector(checkSchemes),
+                    @selector(checkDylibs),
+                    @selector(checkSymlinks),
+                    @selector(canMockLocation)
+                };
+                for (size_t i = 0; i < sizeof(jm_bool_selectors)/sizeof(jm_bool_selectors[0]); i++) {
+                    Method m = class_getInstanceMethod(jailMonkeyCls, jm_bool_selectors[i]);
+                    if (m) {
+                        method_setImplementation(m, imp_implementationWithBlock(^BOOL(id _self) {
+                            return NO;
+                        }));
+                    }
+                }
+
+                Method m_exp = class_getInstanceMethod(jailMonkeyCls, @selector(constantsToExport));
+                if (m_exp) {
+                    method_setImplementation(m_exp, imp_implementationWithBlock(^NSDictionary *(id _self) {
+                        return @{
+                            @"isJailBroken": @NO,
+                            @"canMockLocation": @NO,
+                            @"jailBrokenMessage": @""
+                        };
+                    }));
+                }
+
+                SEL jm_msg_selectors[] = {
+                    @selector(jailBrokenMessage),
+                    @selector(checkPathsMessage),
+                    @selector(checkSchemesMessage),
+                    @selector(checkDylibsMessage),
+                    @selector(checkSymlinksMessage)
+                };
+                for (size_t i = 0; i < sizeof(jm_msg_selectors)/sizeof(jm_msg_selectors[0]); i++) {
+                    Method m = class_getInstanceMethod(jailMonkeyCls, jm_msg_selectors[i]);
+                    if (m) {
+                        method_setImplementation(m, imp_implementationWithBlock(^NSString *(id _self) {
+                            return @"";
+                        }));
+                    }
+                }
+                RH_LOG("MSB mBank: JailMonkey all methods hooked -> clean");
+            }
+        }
+
+        // ── OneSignal Jailbreak Detection Bypass ──────────────────────────────
+        {
+            Class osJbMeta = objc_getMetaClass("OneSignalJailbreakDetection");
+            if (osJbMeta) {
+                Method m_os = class_getInstanceMethod(osJbMeta, @selector(isJailbroken));
+                if (m_os) {
+                    method_setImplementation(m_os, imp_implementationWithBlock(^BOOL(id _cls) {
+                        return NO;
+                    }));
+                    RH_LOG("OneSignalJailbreakDetection.isJailbroken hooked -> NO");
+                }
+            }
+        }
+
+        // ── D1Core.framework (Thales D1 RASP) Bypass ──────────────────────────
+        // D1Core is Thales D1 digital banking security SDK used by MSB mBank.
+        // 1. Hook sub_1E9738 (RASP status validator throwing D1CRaspErrorDomain) -> return 0.
+        // 2. Hook sub_5946CC (Internal integrity checker returning 21 for SAFE).
+        {
+            uintptr_t d1core_base = 0;
+            uint32_t d1_img_count = _dyld_image_count();
+            for (uint32_t i = 0; i < d1_img_count; i++) {
+                const char *iname = _dyld_get_image_name(i);
+                if (iname && strstr(iname, "D1Core.framework/D1Core")) {
+                    d1core_base = (uintptr_t)_dyld_get_image_header(i);
+                    break;
+                }
+            }
+            if (d1core_base) {
+                // Signature 1: sub_1E9738 (RASP status validator throwing D1CRaspErrorDomain)
+                static const uint8_t pat_1e9738[] = {
+                    0xff, 0xc3, 0x02, 0xd1, 0xf4, 0x4b, 0x00, 0xf9, 0xfd, 0x7b, 0x0a, 0xa9, 0xfd, 0x83, 0x02, 0x91
+                };
+                void *fn_1e9738 = find_pattern_in_image((void *)d1core_base, 0x400000, pat_1e9738, sizeof(pat_1e9738));
+                if (fn_1e9738) {
+                    hook_function_abs(fn_1e9738, (void *)replaced_d1core_sub_1E9738);
+                    RH_LOG("D1Core: sub_1E9738 dynamic pattern hooked at %p", fn_1e9738);
+                } else {
+                    hook_function_abs((void *)(d1core_base + 0x1E9738), (void *)replaced_d1core_sub_1E9738);
+                    RH_LOG("D1Core: sub_1E9738 fallback offset hooked at %p", (void *)(d1core_base + 0x1E9738));
+                }
+
+                // Signature 2: sub_5946CC (RASP internal integrity checker returning 21 for SAFE)
+                static const uint8_t pat_5946cc[] = {
+                    0xff, 0x03, 0x04, 0xd1, 0xfc, 0x6f, 0x0a, 0xa9, 0xfa, 0x67, 0x0b, 0xa9, 0xf8, 0x5f, 0x0c, 0xa9
+                };
+                void *fn_5946cc = find_pattern_in_image((void *)d1core_base, 0x700000, pat_5946cc, sizeof(pat_5946cc));
+                if (fn_5946cc) {
+                    hook_function_abs(fn_5946cc, (void *)replaced_d1core_sub_5946CC);
+                    RH_LOG("D1Core: sub_5946CC dynamic pattern hooked at %p", fn_5946cc);
+                } else {
+                    hook_function_abs((void *)(d1core_base + 0x5946CC), (void *)replaced_d1core_sub_5946CC);
+                    RH_LOG("D1Core: sub_5946CC fallback offset hooked at %p", (void *)(d1core_base + 0x5946CC));
+                }
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────

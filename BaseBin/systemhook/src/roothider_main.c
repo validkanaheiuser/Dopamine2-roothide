@@ -1417,7 +1417,9 @@ void roothide_init_with_executable(const char* executable)
 	// before any DYLD_INSERT_LIBRARIES constructor executes.
 	bool isRaspApp = (objc_getClass("BSDPMRHide") != NULL   // BlueShield (LienViet, MBBank)
 	               || objc_getClass("ZDefend")     != NULL   // Zimperium z9 (VPBank)
-	               || objc_getClass("ShieldAPI")   != NULL); // BShield RASP (TCBRetail)
+	               || objc_getClass("ShieldAPI")   != NULL   // BShield RASP (TCBRetail)
+	               || objc_getClass("JailMonkey")  != NULL   // JailMonkey (MSB mBank)
+	               || objc_getClass("D1CCard")     != NULL); // Thales D1 (MSB mBank)
 	if (isRemovableBundlePath(executable) && (jbclient_blacklist_check_pid(getpid()) || isRaspApp)) {
 		gShouldHideJailbreak = true;  // activates Fix B (dyld image-list filter)
 		RH_LOG("ACTIVATED pid=%d exe=%s rasp=%d", getpid(), executable, (int)isRaspApp);
