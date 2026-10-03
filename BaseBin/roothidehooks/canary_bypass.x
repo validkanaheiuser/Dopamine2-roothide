@@ -727,11 +727,6 @@ static int replaced_d1core_sub_5946CC(void) {
     return 21;
 }
 
-// Universal clean int returner (used for Swift RASP functions)
-static int64_t replaced_clean_int_fn(void) {
-    return 0;
-}
-
 // Version-agnostic Pattern Scanner (finds byte signature in Mach-O __TEXT segment)
 static void *find_pattern_in_image(void *base, size_t fallback_max, const uint8_t *pat, size_t pat_len) {
     if (!base || !pat || pat_len == 0) return NULL;
