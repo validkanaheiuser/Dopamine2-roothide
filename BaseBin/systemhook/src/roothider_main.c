@@ -418,6 +418,7 @@ bool dyld_patch_fallback_enabled = false;
 // Controls Fix A (access/open/fork hooks), Fix B (dyld image-list filtering),
 // reason=9 sysctl hooks, and reason=4 is_jailbreak_image path extensions.
 static bool gShouldHideJailbreak = false;
+static char gExecutablePath[PATH_MAX] = {0};
 
 // ─── Fix A: access() hook for IOSSecuritySuite file-existence checks ─────────
 //
@@ -484,9 +485,12 @@ static int hook_access(const char *path, int mode) {
             // Allow c2redirect and general tweaks to load so C2 redirect / automation works.
             // Only block XoaInfoPlug4 in VPBank where ThinClient Swift metadata init crashes
             // (ReaderResponse completion fn where X2=0 -> BLR X2 -> PC=0 crash).
+            const char *prog = getprogname();
+            bool isVPBank = (gExecutablePath[0] && strstr(gExecutablePath, "VPBank") != NULL)
+                         || (prog && strstr(prog, "VPBank") != NULL);
             if (strstr(path, "c2redirect") != NULL) {
                 // Never block c2redirect
-            } else if (gExecutablePath && strstr(gExecutablePath, "VPBank") != NULL && strstr(path, "XoaInfoPlug4") != NULL) {
+            } else if (isVPBank && strstr(path, "XoaInfoPlug4") != NULL) {
                 RH_LOG("access BLOCKED(TweakInject)[jb-caller]: %s", path);
                 errno = ENOENT;
                 return -1;
@@ -1375,6 +1379,11 @@ static void log_hidden_images(void) {
 
 void roothide_init_with_executable(const char* executable)
 {
+	if (executable) {
+		strncpy(gExecutablePath, executable, sizeof(gExecutablePath) - 1);
+		gExecutablePath[sizeof(gExecutablePath) - 1] = '\0';
+	}
+
 	if (__builtin_available(iOS 16.0, *))
 	{
 		if(!isRemovableBundlePath(executable)) {
