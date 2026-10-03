@@ -1679,17 +1679,62 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
             }
 
-            // Swift combine existence scanners: sub_100095178 and sub_102175484
-            // IDA-verified: these functions return 1 if jailbroken, 0 if safe.
+            // ── Hook bshield.framework (ShieldLoader) ──
+            Class shieldLoaderMeta = objc_getMetaClass("ShieldLoader");
+            if (shieldLoaderMeta) {
+                Method m_initShield = class_getInstanceMethod(shieldLoaderMeta, @selector(initShield));
+                if (m_initShield) {
+                    method_setImplementation(m_initShield, imp_implementationWithBlock(^(id _cls) {
+                        // no-op (prevents BShield background inspection threads from starting)
+                    }));
+                }
+                Method m_loadShield = class_getInstanceMethod(shieldLoaderMeta, @selector(loadShield:));
+                if (m_loadShield) {
+                    method_setImplementation(m_loadShield, imp_implementationWithBlock(^id(id _cls, id arg) {
+                        return arg;
+                    }));
+                }
+                RH_LOG("SmartBanking: [SUCCESS] ShieldLoader initShield & loadShield: hooked");
+            }
+
+            // ── Hook VNPAnalyticsTracker & VNPAddionalBodyData isHook / isJailbreak ──
+            Class vnpTrackerCls = objc_getClass("VNPAnalyticsTracker");
+            if (vnpTrackerCls) {
+                Method m_trkHook = class_getInstanceMethod(vnpTrackerCls, @selector(isHook));
+                if (m_trkHook) {
+                    method_setImplementation(m_trkHook, imp_implementationWithBlock(^NSString *(id _self) {
+                        return @"0";
+                    }));
+                }
+                RH_LOG("SmartBanking: [SUCCESS] VNPAnalyticsTracker isHook hooked -> @\"0\"");
+            }
+
+            Class vnpBodyCls = objc_getClass("VNPAddionalBodyData");
+            if (vnpBodyCls) {
+                Method m_bodyHook = class_getInstanceMethod(vnpBodyCls, @selector(isHook));
+                if (m_bodyHook) {
+                    method_setImplementation(m_bodyHook, imp_implementationWithBlock(^NSString *(id _self) {
+                        return @"0";
+                    }));
+                }
+                RH_LOG("SmartBanking: [SUCCESS] VNPAddionalBodyData isHook hooked -> @\"0\"");
+            }
+
+            // Swift combine existence scanners & ShieldFacade:
+            // 1. sub_100095178 and sub_102175484 (Swift jailbreak file scanners -> return 0)
+            // 2. sub_10218ACC8 (Shield/ShieldFacade.swift RASP detector -> return 0)
+            // 3. sub_1031AFF18 (VNPayShield detector -> return empty array)
             const struct mach_header *sbHeader = _dyld_get_image_header(0);
             if (sbHeader) {
                 uintptr_t main_base = (uintptr_t)sbHeader;
                 void *swift_fn1 = (void *)(main_base + 0x95178);
                 void *swift_fn2 = (void *)(main_base + 0x2175484);
+                void *swift_shield_facade = (void *)(main_base + 0x218ACC8);
                 // Return 0 (clean)
                 hook_function_abs(swift_fn1, (void *)replaced_clean_int_fn);
                 hook_function_abs(swift_fn2, (void *)replaced_clean_int_fn);
-                RH_LOG("SmartBanking: [SUCCESS] Swift RASP scanners sub_100095178 & sub_102175484 hooked -> 0");
+                hook_function_abs(swift_shield_facade, (void *)replaced_clean_int_fn);
+                RH_LOG("SmartBanking: [SUCCESS] Swift RASP scanners & ShieldFacade hooked -> 0");
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
