@@ -1639,7 +1639,25 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     }));
                     RH_LOG("SmartBanking: [SUCCESS] SecurityPackage getMainCodeWithTs:phoneNo: hooked -> 892 formula");
                 }
-                RH_LOG("SmartBanking: [SUCCESS] SecurityPackage GET_IS_JAILBREAK, isDidChangeColor, getColorCode, checklib, getMainCodeWithTs:phoneNo: hooked");
+
+                Method m_babb = class_getInstanceMethod(secPkgCls, @selector(BABB8324702D));
+                if (m_babb) {
+                    method_setImplementation(m_babb, imp_implementationWithBlock(^(id _self) {
+                        RH_LOG("SmartBanking: [SUCCESS] SecurityPackage BABB8324702D intercepted -> NO-OP (prevent isRCD=1)");
+                    }));
+                    RH_LOG("SmartBanking: [SUCCESS] SecurityPackage BABB8324702D hooked");
+                }
+
+                Method m_cda = class_getInstanceMethod(secPkgCls, @selector(checkDeviceAvailble));
+                if (m_cda) {
+                    method_setImplementation(m_cda, imp_implementationWithBlock(^BOOL(id _self) {
+                        RH_LOG("SmartBanking: [SUCCESS] SecurityPackage checkDeviceAvailble intercepted -> YES");
+                        return YES;
+                    }));
+                    RH_LOG("SmartBanking: [SUCCESS] SecurityPackage checkDeviceAvailble hooked");
+                }
+
+                RH_LOG("SmartBanking: [SUCCESS] SecurityPackage GET_IS_JAILBREAK, isDidChangeColor, getColorCode, checklib, getMainCodeWithTs:phoneNo:, BABB8324702D, checkDeviceAvailble hooked");
             }
 
             Class sotpCls = objc_getClass("SOTP");
@@ -1719,6 +1737,82 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     }));
                 }
                 RH_LOG("SmartBanking: [SUCCESS] VNPAddionalBodyData isHook hooked -> @\"0\"");
+            }
+
+            // ── Circular 77 / VNPShield Root Detection Neutralization (C-2 popup) ──
+            // In SmartBanking (AppDelegateHandler+VNPShield.swift):
+            // -[_TtC12SmartBanking10WD9iCyDtai tteMsVF8OF] (imp 0x1000138e8) calls sub_100013728
+            // which scans the environment/views and presents vnpshield.circular.77.waring.message (C-2).
+            // Hooking tteMsVF8OF to a NO-OP completely prevents sub_100013728 from ever running!
+            Class wd9Cls = objc_getClass("_TtC12SmartBanking10WD9iCyDtai");
+            if (wd9Cls) {
+                Method m_ttems = class_getInstanceMethod(wd9Cls, @selector(tteMsVF8OF));
+                if (m_ttems) {
+                    method_setImplementation(m_ttems, imp_implementationWithBlock(^(id _self) {
+                        RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10WD9iCyDtai tteMsVF8OF intercepted -> NO-OP (Circular 77 bypass)");
+                    }));
+                    RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10WD9iCyDtai tteMsVF8OF hooked");
+                } else {
+                    RH_LOG("SmartBanking: [WARN] _TtC12SmartBanking10WD9iCyDtai tteMsVF8OF method not found");
+                }
+            }
+
+            Class oqzCls = objc_getClass("_TtC12SmartBanking10OQZMeL2A9a");
+            if (oqzCls) {
+                Method m_vdl = class_getInstanceMethod(oqzCls, @selector(viewDidLoad));
+                if (m_vdl) {
+                    method_setImplementation(m_vdl, imp_implementationWithBlock(^(UIViewController *_self) {
+                        RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10OQZMeL2A9a viewDidLoad intercepted -> dismiss");
+                        [_self dismissViewControllerAnimated:NO completion:nil];
+                    }));
+                    RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10OQZMeL2A9a viewDidLoad hooked");
+                }
+            }
+
+            // Universal modal defense: intercept presentViewController:animated:completion:
+            // Blocks any attempt to display C-2 root warning popups or VNPShield alert view controllers
+            Class uiVcCls = objc_getClass("UIViewController");
+            if (uiVcCls) {
+                Method m_pvc = class_getInstanceMethod(uiVcCls, @selector(presentViewController:animated:completion:));
+                if (m_pvc) {
+                    IMP orig_pvc = method_getImplementation(m_pvc);
+                    method_setImplementation(m_pvc, imp_implementationWithBlock(^(UIViewController *_self, UIViewController *vc, BOOL flag, id completion) {
+                        if (vc) {
+                            NSString *clsName = NSStringFromClass([vc class]);
+                            if ([clsName containsString:@"OQZMeL2A9a"] || [clsName containsString:@"VNPShield"]) {
+                                RH_LOG("SmartBanking: [BLOCKED] presentation of %s", [clsName UTF8String]);
+                                if (completion) {
+                                    dispatch_async(dispatch_get_main_queue(), ^{
+                                        ((void (^)(void))completion)();
+                                    });
+                                }
+                                return;
+                            }
+                            if ([vc isKindOfClass:[UIAlertController class]]) {
+                                UIAlertController *alert = (UIAlertController *)vc;
+                                NSString *title = alert.title ?: @"";
+                                NSString *message = alert.message ?: @"";
+                                if ([title containsString:@"b\u1ebb kh\u00f3a"] || [message containsString:@"b\u1ebb kh\u00f3a"] ||
+                                    [title containsString:@"Th\u00f4ng t\u01b0 77"] || [message containsString:@"Th\u00f4ng t\u01b0 77"] ||
+                                    [title containsString:@"77/2025"] || [message containsString:@"77/2025"] ||
+                                    [title containsString:@"TT-NHNN"] || [message containsString:@"TT-NHNN"] ||
+                                    [title containsString:@"Bootloader"] || [message containsString:@"Bootloader"] ||
+                                    [title containsString:@"C-2"] || [message containsString:@"C-2"] ||
+                                    [title containsString:@"Circular 77"] || [message containsString:@"Circular 77"]) {
+                                    RH_LOG("SmartBanking: [BLOCKED] UIAlertController with C-2 / Circular 77 root warning");
+                                    if (completion) {
+                                        dispatch_async(dispatch_get_main_queue(), ^{
+                                            ((void (^)(void))completion)();
+                                        });
+                                    }
+                                    return;
+                                }
+                            }
+                        }
+                        ((void (*)(id, SEL, UIViewController *, BOOL, id))orig_pvc)(_self, @selector(presentViewController:animated:completion:), vc, flag, completion);
+                    }));
+                    RH_LOG("SmartBanking: [SUCCESS] UIViewController presentViewController:animated:completion: hooked (anti-C2 modal shield)");
+                }
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
