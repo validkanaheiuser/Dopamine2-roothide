@@ -1624,7 +1624,25 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                         // no-op (prevents logging Exit1/Exit2/Exit3 analytics)
                     }));
                 }
-                RH_LOG("SmartBanking: [SUCCESS] SecurityPackage GET_IS_JAILBREAK, isDidChangeColor, getColorCode, checklib hooked");
+                Method m_gmc = class_getInstanceMethod(secPkgCls, @selector(getMainCodeWithTs:phoneNo:));
+                if (m_gmc) {
+                    method_setImplementation(m_gmc, imp_implementationWithBlock(^NSString *(id _self, NSString *ts, NSString *phoneNo) {
+                        if (!ts || !phoneNo || [ts length] < 12 || [phoneNo length] < 6) return @"";
+                        int v76_vals[3] = {8, 9, 2}; // "892" (clean device code expected by BIDV/VNPay server)
+                        int results[3];
+                        for (int i = 0; i < 3; i++) {
+                            int v76_digit = v76_vals[i];
+                            NSRange phoneRange = NSMakeRange([phoneNo length] - 2 - (i * 2), 2);
+                            int phone_val = [[phoneNo substringWithRange:phoneRange] intValue];
+                            NSRange tsRange = NSMakeRange(9 + i, 1);
+                            int ts_val = [[ts substringWithRange:tsRange] intValue];
+                            results[i] = v76_digit + phone_val + ts_val;
+                        }
+                        return [NSString stringWithFormat:@"%02x%02x%02x", results[0], results[1], results[2]];
+                    }));
+                    RH_LOG("SmartBanking: [SUCCESS] SecurityPackage getMainCodeWithTs:phoneNo: hooked -> 892 formula");
+                }
+                RH_LOG("SmartBanking: [SUCCESS] SecurityPackage GET_IS_JAILBREAK, isDidChangeColor, getColorCode, checklib, getMainCodeWithTs:phoneNo: hooked");
             }
 
             Class sotpCls = objc_getClass("SOTP");
@@ -1679,23 +1697,9 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
             }
 
-            // ── Hook bshield.framework (ShieldLoader) ──
-            Class shieldLoaderMeta = objc_getMetaClass("ShieldLoader");
-            if (shieldLoaderMeta) {
-                Method m_initShield = class_getInstanceMethod(shieldLoaderMeta, @selector(initShield));
-                if (m_initShield) {
-                    method_setImplementation(m_initShield, imp_implementationWithBlock(^(id _cls) {
-                        // no-op (prevents BShield background inspection threads from starting)
-                    }));
-                }
-                Method m_loadShield = class_getInstanceMethod(shieldLoaderMeta, @selector(loadShield:));
-                if (m_loadShield) {
-                    method_setImplementation(m_loadShield, imp_implementationWithBlock(^id(id _cls, id arg) {
-                        return arg;
-                    }));
-                }
-                RH_LOG("SmartBanking: [SUCCESS] ShieldLoader initShield & loadShield: hooked");
-            }
+            // Note: ShieldLoader (bshield.framework) must NOT be blocked.
+            // bshield initializes network request signing and tokens needed by the server.
+            // Blocking ShieldLoader causes server error C-2 because requests lack required bshield headers.
 
             // ── Hook VNPAnalyticsTracker & VNPAddionalBodyData isHook / isJailbreak ──
             Class vnpTrackerCls = objc_getClass("VNPAnalyticsTracker");
@@ -1718,23 +1722,6 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     }));
                 }
                 RH_LOG("SmartBanking: [SUCCESS] VNPAddionalBodyData isHook hooked -> @\"0\"");
-            }
-
-            // Swift combine existence scanners & ShieldFacade:
-            // 1. sub_100095178 and sub_102175484 (Swift jailbreak file scanners -> return 0)
-            // 2. sub_10218ACC8 (Shield/ShieldFacade.swift RASP detector -> return 0)
-            // 3. sub_1031AFF18 (VNPayShield detector -> return empty array)
-            const struct mach_header *sbHeader = _dyld_get_image_header(0);
-            if (sbHeader) {
-                uintptr_t main_base = (uintptr_t)sbHeader;
-                void *swift_fn1 = (void *)(main_base + 0x95178);
-                void *swift_fn2 = (void *)(main_base + 0x2175484);
-                void *swift_shield_facade = (void *)(main_base + 0x218ACC8);
-                // Return 0 (clean)
-                hook_function_abs(swift_fn1, (void *)replaced_clean_int_fn);
-                hook_function_abs(swift_fn2, (void *)replaced_clean_int_fn);
-                hook_function_abs(swift_shield_facade, (void *)replaced_clean_int_fn);
-                RH_LOG("SmartBanking: [SUCCESS] Swift RASP scanners & ShieldFacade hooked -> 0");
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────

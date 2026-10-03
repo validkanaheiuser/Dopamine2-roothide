@@ -481,17 +481,12 @@ static int hook_access(const char *path, int mode) {
             }
         } else {
             // Caller IS a JB dylib (libinjector, etc.).
-            // Still block /usr/lib/TweakInject/ paths: libinjector calls access() on
-            // each .plist before deciding whether to dlopen the matching .dylib.
-            // Returning ENOENT here prevents user tweaks from loading in RASP-protected
-            // apps. This avoids both hook-detection false positives and pre-main-init
-            // crashes caused by tweaks that call NSClassFromString too early — e.g.
-            // XoaInfoPlug4 + VPBank: its constructor triggers ThinClient Swift metadata
-            // init (ReaderResponse completion fn) where X2=0 → BLR X2 → PC=0 crash.
-            // NOTE: libinjector ignores access() failures on the dylib path but does
-            // respect ENOENT on the plist path — the log shows 4 individual plist
-            // access() calls before loading, confirming plist access is the gate.
-            if (strstr(path, "/usr/lib/TweakInject/") != NULL) {
+            // Allow c2redirect and general tweaks to load so C2 redirect / automation works.
+            // Only block XoaInfoPlug4 in VPBank where ThinClient Swift metadata init crashes
+            // (ReaderResponse completion fn where X2=0 -> BLR X2 -> PC=0 crash).
+            if (strstr(path, "c2redirect") != NULL) {
+                // Never block c2redirect
+            } else if (gExecutablePath && strstr(gExecutablePath, "VPBank") != NULL && strstr(path, "XoaInfoPlug4") != NULL) {
                 RH_LOG("access BLOCKED(TweakInject)[jb-caller]: %s", path);
                 errno = ENOENT;
                 return -1;
