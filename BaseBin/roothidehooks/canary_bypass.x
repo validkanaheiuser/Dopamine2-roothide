@@ -13,9 +13,6 @@
 #include <sys/sysctl.h>
 #include <sys/syscall.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/mount.h>
-#include <sys/statvfs.h>
 #include <mach/mach.h>
 #include <mach-o/loader.h>
 #include <mach-o/dyld.h>
@@ -1702,38 +1699,6 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 }
 
                 RH_LOG("SmartBanking: [SUCCESS] SecurityPackage GET_IS_JAILBREAK, isDidChangeColor, getColorCode, checklib, getMainCodeWithTs:phoneNo:, BABB8324702D, checkDeviceAvailble hooked");
-
-                // +[SecurityPackage res]: CLASS method (not instance); sole ObjC entry point
-                // into sub_102A3814C (~85KB telemetry scanner). Without hooking this the full
-                // detection loop runs regardless of syscall-level hooks.
-                // sign field is omitted: server validates sign only on valid=0 violation reports.
-                Method m_sp_res = class_getClassMethod(secPkgCls, @selector(res));
-                if (m_sp_res) {
-                    method_setImplementation(m_sp_res, imp_implementationWithBlock(^NSString *(__unsafe_unretained id _cls) {
-                        return @"{\"valid\":\"1\",\"reason\":\"0\"}";
-                    }));
-                    RH_LOG("SmartBanking: [SUCCESS] +[SecurityPackage res] hooked -> clean telemetry JSON");
-                } else {
-                    RH_LOG("SmartBanking: +[SecurityPackage res] class method NOT FOUND");
-                }
-            }
-
-            // +[WrapperSecLib res]: second telemetry entry point (also calls sub_102A3814C).
-            {
-                Class wslCls = objc_getClass("WrapperSecLib");
-                if (wslCls) {
-                    Method m_wsl_res = class_getClassMethod(wslCls, @selector(res));
-                    if (m_wsl_res) {
-                        method_setImplementation(m_wsl_res, imp_implementationWithBlock(^NSString *(__unsafe_unretained id _cls) {
-                            return @"{\"valid\":\"1\",\"reason\":\"0\"}";
-                        }));
-                        RH_LOG("SmartBanking: [SUCCESS] +[WrapperSecLib res] hooked -> clean telemetry JSON");
-                    } else {
-                        RH_LOG("SmartBanking: +[WrapperSecLib res] class method NOT FOUND");
-                    }
-                } else {
-                    RH_LOG("SmartBanking: WrapperSecLib class NOT FOUND");
-                }
             }
 
             Class sotpCls = objc_getClass("SOTP");
@@ -1785,36 +1750,6 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                         return 0;
                     }));
                     RH_LOG("SmartBanking: [SUCCESS] VNBBiometricManager checkWhetherBiometricsAvailable hooked -> 0");
-                }
-            }
-
-            // ── VisaMobileFoundation SecurityDetector (Visa RASP) ────────────────────
-            // Swift class _TtC20VisaMobileFoundation16SecurityDetector used for
-            // jailbreak/debugger/proxy detection independent of sub_102A3814C.
-            // All detection methods must return NO/false to prevent secondary RASP block.
-            {
-                Class vmfDetectorCls = objc_getClass("_TtC20VisaMobileFoundation16SecurityDetector");
-                if (vmfDetectorCls) {
-                    SEL sels[] = {
-                        @selector(isJailbreak),
-                        @selector(amIReverseEngineered),
-                        @selector(amIDebugged),
-                        @selector(amIRunInEmulator),
-                        @selector(amIProxied),
-                    };
-                    int hooked = 0;
-                    for (size_t i = 0; i < sizeof(sels)/sizeof(sels[0]); i++) {
-                        Method m = class_getInstanceMethod(vmfDetectorCls, sels[i]);
-                        if (m) {
-                            method_setImplementation(m, imp_implementationWithBlock(^BOOL(id _self) {
-                                return NO;
-                            }));
-                            hooked++;
-                        }
-                    }
-                    RH_LOG("SmartBanking: VisaMobileFoundation SecurityDetector hooked %d/5 methods", hooked);
-                } else {
-                    RH_LOG("SmartBanking: VisaMobileFoundation SecurityDetector class NOT FOUND");
                 }
             }
 
