@@ -7,6 +7,8 @@
 #include <sys/sysctl.h>
 #include <sys/proc_info.h>
 #include <sys/mount.h>
+#include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <sys/syscall.h>
 #include <mach-o/dyld_images.h>
 #include <mach-o/loader.h>
@@ -458,6 +460,25 @@ static const char *const kBlockedPathPatterns[] = {
     "/bin/sh",
     "/bin/bash",
     "/etc/ssh",
+    "frida",                    // Frida instrumentation (VisaMobileFoundation / SmartBanking)
+    "/var/apt",                 // SmartBanking sub_102A3814C XOR scanner paths
+    "/var/dpkg",
+    "/var/etc",
+    "/var/Lib",
+    "/var/libexec",
+    "/var/Library",
+    "/var/sbin",
+    "/var/share",
+    "/var/ssh",
+    "/var/usr",
+    "/var/master.passwd",
+    "/var/sudo_logsrvd.conf",
+    "/var/suid_profile",
+    "/var/zlogin",
+    "/var/zlogout",
+    "/var/zprofile",
+    "/var/zshenv",
+    "/var/zshrc",
     NULL
 };
 
@@ -553,6 +574,21 @@ static pid_t hook_fork(void) {
 #ifndef SYS_readlink
 #define SYS_readlink 58
 #endif
+#ifndef SYS_stat64
+#define SYS_stat64 338
+#endif
+#ifndef SYS_lstat64
+#define SYS_lstat64 340
+#endif
+#ifndef SYS_statfs64
+#define SYS_statfs64 345
+#endif
+#ifndef SYS_getfsstat64
+#define SYS_getfsstat64 347
+#endif
+#ifndef SYS_getppid
+#define SYS_getppid 39
+#endif
 
 static ssize_t hook_readlink(const char *path, char *buf, size_t bufsiz) {
     if (gShouldHideJailbreak && path) {
@@ -570,6 +606,90 @@ static ssize_t hook_readlink(const char *path, char *buf, size_t bufsiz) {
         }
     }
     return (ssize_t)syscall(SYS_readlink, path, buf, bufsiz);
+}
+
+// ─── stat() / lstat() hooks: block jailbreak paths from RASP stat checks ────
+// bshield sub_1FD4E4 and VisaMobileFoundation FileChecker invoke stat() directly.
+// Returning ENOENT prevents these checks from detecting jailbreak dylibs/paths.
+static int hook_stat(const char *path, struct stat *buf) {
+    if (gShouldHideJailbreak && path) {
+        if (strcmp(path, "/var/jb") == 0 || strncmp(path, "/var/jb/", 8) == 0) {
+            RH_LOG("stat BLOCKED: %s", path);
+            errno = ENOENT;
+            return -1;
+        }
+        for (int i = 0; kBlockedPathPatterns[i]; i++) {
+            if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
+                RH_LOG("stat BLOCKED(pattern=%s): %s", kBlockedPathPatterns[i], path);
+                errno = ENOENT;
+                return -1;
+            }
+        }
+    }
+    return (int)syscall(SYS_stat64, path, buf);
+}
+
+static int hook_lstat(const char *path, struct stat *buf) {
+    if (gShouldHideJailbreak && path) {
+        if (strcmp(path, "/var/jb") == 0 || strncmp(path, "/var/jb/", 8) == 0) {
+            RH_LOG("lstat BLOCKED: %s", path);
+            errno = ENOENT;
+            return -1;
+        }
+        for (int i = 0; kBlockedPathPatterns[i]; i++) {
+            if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
+                RH_LOG("lstat BLOCKED(pattern=%s): %s", kBlockedPathPatterns[i], path);
+                errno = ENOENT;
+                return -1;
+            }
+        }
+    }
+    return (int)syscall(SYS_lstat64, path, buf);
+}
+
+// ─── statfs() hook: clean root mount point properties ───────────────────────
+// SmartBanking sub_102A3814C checks:
+// check 12 (0x102a38204): verifies mount-on path for "/" starts with '/'
+// check 66 (0x102a38740): verifies root mount flags include MNT_RDONLY
+// check 78 (0x102a38d98): verifies mount-on path is "/"
+// VisaMobileFoundation getMountedVolumeInfoViaStatfs: inspects mount info.
+static int hook_statfs(const char *path, struct statfs *buf) {
+    if (!path || !buf) {
+        errno = EFAULT;
+        return -1;
+    }
+    if (gShouldHideJailbreak) {
+        if (strcmp(path, "/var/jb") == 0 || strncmp(path, "/var/jb/", 8) == 0) {
+            errno = ENOENT;
+            return -1;
+        }
+        for (int i = 0; kBlockedPathPatterns[i]; i++) {
+            if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
+                errno = ENOENT;
+                return -1;
+            }
+        }
+    }
+    int ret = (int)syscall(SYS_statfs64, path, buf);
+    if (ret == 0 && gShouldHideJailbreak && path) {
+        if (strcmp(path, "/") == 0 || (buf->f_mntonname[0] == '/' && buf->f_mntonname[1] == '\0')) {
+            buf->f_flags |= MNT_RDONLY;
+            strncpy(buf->f_mntonname, "/", sizeof(buf->f_mntonname) - 1);
+            char *at = strchr(buf->f_mntfromname, '@');
+            if (at) *at = '\0';
+        }
+    }
+    return ret;
+}
+
+// ─── getppid() hook: spoof parent pid to 1 (launchd) for RASP apps ──────────
+// SmartBanking sub_102A3814C (0x102a39adc) checks if getppid() == 1.
+// If not 1, it sets error flag 0x15 (21). Spoofing 1 ensures clean launch.
+static pid_t hook_getppid(void) {
+    if (gShouldHideJailbreak) {
+        return 1;
+    }
+    return (pid_t)syscall(SYS_getppid);
 }
 
 // ─── getenv() hook: hide DYLD_INSERT_LIBRARIES and jailbreak env vars ────────
@@ -605,44 +725,12 @@ static char *hook_getenv(const char *name) {
     return NULL;
 }
 
-// ─── getmntinfo() hook: filter rootless/jailbreak and snapshot mount points ──
+// ─── getmntinfo() & getfsstat() hooks: filter rootless/jailbreak mounts ───────
 // SmartBanking 0x102A3814C (0x102a38218) inspects getmntinfo mount points:
 // 1. Checks if f_mntfromname of non-root mounts contains '@' (snapshot detection).
 // 2. Checks if two mount points have duplicate f_mntfromname (bind-mount detection).
-// Any match sets w22 to 0x16 or 0x17, tripping Circular 77 detection.
-static struct statfs *gCleanMntBuf = NULL;
-static int gCleanMntCount = 0;
-
-static int hook_getmntinfo(struct statfs **mntbufp, int flags) {
-    if (!mntbufp) return 0;
-
-    int count = getfsstat(NULL, 0, MNT_NOWAIT);
-    if (count <= 0) return 0;
-
-    int bufsize = (count + 4) * sizeof(struct statfs);
-    struct statfs *rawbuf = (struct statfs *)malloc(bufsize);
-    if (!rawbuf) return 0;
-
-    int real_count = getfsstat(rawbuf, bufsize, flags);
-    if (real_count <= 0) {
-        free(rawbuf);
-        return 0;
-    }
-
-    if (!gShouldHideJailbreak) {
-        if (gCleanMntBuf) free(gCleanMntBuf);
-        gCleanMntBuf = rawbuf;
-        gCleanMntCount = real_count;
-        *mntbufp = gCleanMntBuf;
-        return real_count;
-    }
-
-    struct statfs *cleanbuf = (struct statfs *)malloc(bufsize);
-    if (!cleanbuf) {
-        free(rawbuf);
-        return 0;
-    }
-
+// VisaMobileFoundation FileChecker.getMountedVolumesViaGetfsstat calls getfsstat directly.
+static int filter_clean_mounts(struct statfs *rawbuf, int real_count, struct statfs *cleanbuf) {
     int clean_count = 0;
     for (int i = 0; i < real_count; i++) {
         const char *on = rawbuf[i].f_mntonname;
@@ -671,14 +759,99 @@ static int hook_getmntinfo(struct statfs **mntbufp, int flags) {
 
         cleanbuf[clean_count++] = rawbuf[i];
     }
+    return clean_count;
+}
 
+static struct statfs *gCleanMntBuf = NULL;
+static int gCleanMntCount = 0;
+
+static int hook_getmntinfo(struct statfs **mntbufp, int flags) {
+    if (!mntbufp) return 0;
+
+    int count = (int)syscall(SYS_getfsstat64, NULL, 0, MNT_NOWAIT);
+    if (count <= 0) return 0;
+
+    int bufsize = (count + 8) * sizeof(struct statfs);
+    struct statfs *rawbuf = (struct statfs *)malloc(bufsize);
+    if (!rawbuf) return 0;
+
+    int real_count = (int)syscall(SYS_getfsstat64, rawbuf, bufsize, flags);
+    if (real_count <= 0) {
+        free(rawbuf);
+        return 0;
+    }
+
+    if (!gShouldHideJailbreak) {
+        if (gCleanMntBuf) free(gCleanMntBuf);
+        gCleanMntBuf = rawbuf;
+        gCleanMntCount = real_count;
+        *mntbufp = gCleanMntBuf;
+        return real_count;
+    }
+
+    struct statfs *cleanbuf = (struct statfs *)malloc(bufsize);
+    if (!cleanbuf) {
+        free(rawbuf);
+        return 0;
+    }
+
+    int clean_count = filter_clean_mounts(rawbuf, real_count, cleanbuf);
     free(rawbuf);
+
     if (gCleanMntBuf) free(gCleanMntBuf);
     gCleanMntBuf = cleanbuf;
     gCleanMntCount = clean_count;
     *mntbufp = gCleanMntBuf;
     RH_LOG("getmntinfo filtered %d -> %d mounts", real_count, clean_count);
     return clean_count;
+}
+
+static int hook_getfsstat(struct statfs *buf, int bufsize, int flags) {
+    int total_raw = (int)syscall(SYS_getfsstat64, NULL, 0, MNT_NOWAIT);
+    if (total_raw <= 0) return total_raw;
+
+    int alloc_size = (total_raw + 8) * sizeof(struct statfs);
+    struct statfs *rawbuf = (struct statfs *)malloc(alloc_size);
+    if (!rawbuf) return (int)syscall(SYS_getfsstat64, buf, bufsize, flags);
+
+    int real_count = (int)syscall(SYS_getfsstat64, rawbuf, alloc_size, flags);
+    if (real_count <= 0) {
+        free(rawbuf);
+        return real_count;
+    }
+
+    if (!gShouldHideJailbreak) {
+        if (!buf || bufsize == 0) {
+            free(rawbuf);
+            return real_count;
+        }
+        int max_entries = bufsize / (int)sizeof(struct statfs);
+        int copy_count = real_count < max_entries ? real_count : max_entries;
+        memcpy(buf, rawbuf, copy_count * sizeof(struct statfs));
+        free(rawbuf);
+        return copy_count;
+    }
+
+    struct statfs *cleanbuf = (struct statfs *)malloc(alloc_size);
+    if (!cleanbuf) {
+        free(rawbuf);
+        return (int)syscall(SYS_getfsstat64, buf, bufsize, flags);
+    }
+
+    int clean_count = filter_clean_mounts(rawbuf, real_count, cleanbuf);
+    free(rawbuf);
+
+    if (!buf || bufsize == 0) {
+        free(cleanbuf);
+        return clean_count;
+    }
+
+    int max_entries = bufsize / (int)sizeof(struct statfs);
+    int copy_count = clean_count < max_entries ? clean_count : max_entries;
+    memcpy(buf, cleanbuf, copy_count * sizeof(struct statfs));
+    free(cleanbuf);
+    RH_LOG("getfsstat filtered %d -> %d mounts (copied %d)", real_count, clean_count, copy_count);
+    return copy_count;
 }
 
 // ─── Fix B: dyld image-list hooks to hide jailbreak dylibs from MC1 ──────────
@@ -1566,6 +1739,27 @@ void roothide_init_with_executable(const char* executable)
 
 		litehook_hook_function(readlink, hook_readlink);
 		RH_LOG("hook_readlink installed");
+
+		litehook_hook_function(stat, hook_stat);
+		litehook_hook_function(lstat, hook_lstat);
+		void *sym_stat_inode64 = dlsym(RTLD_DEFAULT, "stat$INODE64");
+		if (sym_stat_inode64) litehook_hook_function(sym_stat_inode64, hook_stat);
+		void *sym_lstat_inode64 = dlsym(RTLD_DEFAULT, "lstat$INODE64");
+		if (sym_lstat_inode64) litehook_hook_function(sym_lstat_inode64, hook_lstat);
+		RH_LOG("hook_stat/hook_lstat installed");
+
+		litehook_hook_function(statfs, hook_statfs);
+		void *sym_statfs_inode64 = dlsym(RTLD_DEFAULT, "statfs$INODE64");
+		if (sym_statfs_inode64) litehook_hook_function(sym_statfs_inode64, hook_statfs);
+		RH_LOG("hook_statfs installed");
+
+		litehook_hook_function(getfsstat, hook_getfsstat);
+		void *sym_getfsstat_inode64 = dlsym(RTLD_DEFAULT, "getfsstat$INODE64");
+		if (sym_getfsstat_inode64) litehook_hook_function(sym_getfsstat_inode64, hook_getfsstat);
+		RH_LOG("hook_getfsstat installed");
+
+		litehook_hook_function(getppid, hook_getppid);
+		RH_LOG("hook_getppid installed");
 
 		litehook_hook_function(getenv, hook_getenv);
 		RH_LOG("hook_getenv installed");
