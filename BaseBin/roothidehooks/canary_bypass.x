@@ -859,7 +859,12 @@ static bool hook_function_abs(void *target, void *replacement) {
 
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
-    RH_LOG("logScanBypassInit called (build: " RHHOOKS_VERSION ")");
+    const char *progname = getprogname();
+    NSString *bundleId = [[NSBundle mainBundle] bundleIdentifier];
+    BOOL is_smartbanking = (progname && strstr(progname, "SmartBanking") != NULL) ||
+                           (bundleId && [bundleId localizedCaseInsensitiveContainsString:@"smartbanking"]);
+
+    RH_LOG("logScanBypassInit called (prog: %s, build: " RHHOOKS_VERSION ")", progname ?: "unknown");
 
     // ── RuntimeHookChecker bypass: install method_getImplementation hook first ──
     // Only needed for MBV Bank: _TtC9MBRaspSdk18RuntimeHookChecker (in MBRaspSdk)
@@ -1020,7 +1025,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
         // on class_getMethodImplementation(UIApplication, @selector(canOpenURL:)).
         // lsd (Launch Services daemon) already blocks jailbreak schemes system-wide,
         // and SmartBanking has no jailbreak schemes in Info.plist.
-        if (strstr(progname, "SmartBanking") == NULL) {
+        if (!is_smartbanking) {
             Class uiAppCls = objc_getClass("UIApplication");
             if (uiAppCls) {
                 Method m_cou = class_getInstanceMethod(uiAppCls, @selector(canOpenURL:));
