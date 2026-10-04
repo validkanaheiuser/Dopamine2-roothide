@@ -168,6 +168,25 @@ static IMP replaced_method_getImplementation(Method m) {
     return orig_method_getImplementation(m);
 }
 
+static IMP (*orig_class_getMethodImplementation)(Class cls, SEL name) = NULL;
+
+static IMP replaced_class_getMethodImplementation(Class cls, SEL name) {
+    if (cls && name) {
+        Method m = class_getInstanceMethod(cls, name);
+        if (!m) m = class_getClassMethod(cls, name);
+        if (m) {
+            for (int i = 0; i < s_rh_method_count; i++) {
+                if (s_rh_methods[i] == m) {
+                    RH_LOG("class_getMethodImplementation: spoofed %s orig=%p",
+                           sel_getName(name) ?: "", (void *)s_rh_orig_imps[i]);
+                    return s_rh_orig_imps[i];
+                }
+            }
+        }
+    }
+    return orig_class_getMethodImplementation ? orig_class_getMethodImplementation(cls, name) : NULL;
+}
+
 // ─── BSLogCek + BSZInspection + cekL3Int ObjC-layer bypass ──────────────────
 //
 // BSLogCek (0x38a00 in blueshield.framework, DOPAMINE_WEAKNESS_2.md reason=0):
@@ -865,6 +884,11 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                        (void *)replaced_method_getImplementation,
                        (void **)&orig_method_getImplementation);
         RH_LOG("method_getImplementation hooked (RuntimeHookChecker bypass)");
+
+        MSHookFunction((void *)class_getMethodImplementation,
+                       (void *)replaced_class_getMethodImplementation,
+                       (void **)&orig_class_getMethodImplementation);
+        RH_LOG("class_getMethodImplementation hooked (Anti-Hook PAC scanner bypass)");
     } else {
         RH_LOG("method_getImplementation hook SKIPPED (ZDefend present, PAC safety)");
     }
@@ -991,10 +1015,12 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             rh_record_method(m_sa, (IMP)orig_subpathsAtPath);
         }
         // ── Hook UIApplication canOpenURL: → NO for jailbreak tool schemes ───────
-        // BSHasApp cekL1Int (blueshield.framework 0x31E6C) queries whether schemes
-        // like sileo://, cydia://, zbra:// can be opened to detect jailbreak package
-        // managers. method_setImplementation handles compact method encoding on UIKit.
-        {
+        // In SmartBanking (BIDV), do NOT hook UIApplication canOpenURL:!
+        // SmartBanking's Anti-Hook scanner (0x102466784) verifies PACIBSP (0xd503237f)
+        // on class_getMethodImplementation(UIApplication, @selector(canOpenURL:)).
+        // lsd (Launch Services daemon) already blocks jailbreak schemes system-wide,
+        // and SmartBanking has no jailbreak schemes in Info.plist.
+        if (strstr(progname, "SmartBanking") == NULL) {
             Class uiAppCls = objc_getClass("UIApplication");
             if (uiAppCls) {
                 Method m_cou = class_getInstanceMethod(uiAppCls, @selector(canOpenURL:));
@@ -1009,6 +1035,16 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             } else {
                 RH_LOG("UIApplication class NOT FOUND");
             }
+        } else {
+            Class uiAppCls = objc_getClass("UIApplication");
+            if (uiAppCls) {
+                Method m_cou = class_getInstanceMethod(uiAppCls, @selector(canOpenURL:));
+                if (m_cou) {
+                    orig_canOpenURL = (__typeof__(orig_canOpenURL))method_getImplementation(m_cou);
+                    rh_record_method(m_cou, (IMP)orig_canOpenURL);
+                }
+            }
+            RH_LOG("SmartBanking: UIApplication.canOpenURL: hook SKIPPED (PAC integrity preservation)");
         }
         // ── Hook NSClassFromString → Nil for "LSApplicationWorkspace" ─────────
         // cekL2Int (blueshield r82q 0x324D4) calls NSClassFromString as its first
@@ -1737,78 +1773,6 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     }));
                 }
                 RH_LOG("SmartBanking: [SUCCESS] VNPAddionalBodyData isHook hooked -> @\"0\"");
-            }
-
-            // ── Circular 77 / VNPShield Root Detection Neutralization (C-2 popup) ──
-            // In SmartBanking (AppDelegateHandler+VNPShield.swift):
-            // -[_TtC12SmartBanking10WD9iCyDtai tteMsVF8OF] (imp 0x1000138e8) calls sub_100013728
-            // which scans the environment/views and presents vnpshield.circular.77.waring.message (C-2).
-            // Hooking tteMsVF8OF to a NO-OP completely prevents sub_100013728 from ever running!
-            Class wd9Cls = objc_getClass("_TtC12SmartBanking10WD9iCyDtai");
-            if (wd9Cls) {
-                Method m_ttems = class_getInstanceMethod(wd9Cls, @selector(tteMsVF8OF));
-                if (m_ttems) {
-                    method_setImplementation(m_ttems, imp_implementationWithBlock(^(id _self) {
-                        RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10WD9iCyDtai tteMsVF8OF intercepted -> NO-OP (Circular 77 bypass)");
-                    }));
-                    RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10WD9iCyDtai tteMsVF8OF hooked");
-                } else {
-                    RH_LOG("SmartBanking: [WARN] _TtC12SmartBanking10WD9iCyDtai tteMsVF8OF method not found");
-                }
-            }
-
-            Class oqzCls = objc_getClass("_TtC12SmartBanking10OQZMeL2A9a");
-            if (oqzCls) {
-                Method m_vdl = class_getInstanceMethod(oqzCls, @selector(viewDidLoad));
-                if (m_vdl) {
-                    method_setImplementation(m_vdl, imp_implementationWithBlock(^(id _self) {
-                        RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10OQZMeL2A9a viewDidLoad intercepted -> NO-OP");
-                    }));
-                    RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10OQZMeL2A9a viewDidLoad hooked");
-                }
-            }
-
-            // Universal modal defense: intercept presentViewController:animated:completion:
-            // Blocks any attempt to display C-2 root warning popups or VNPShield alert view controllers
-            Class uiVcCls = objc_getClass("UIViewController");
-            if (uiVcCls) {
-                Method m_pvc = class_getInstanceMethod(uiVcCls, @selector(presentViewController:animated:completion:));
-                if (m_pvc) {
-                    IMP orig_pvc = method_getImplementation(m_pvc);
-                    Class alertCls = objc_getClass("UIAlertController");
-                    method_setImplementation(m_pvc, imp_implementationWithBlock(^(id _self, id vc, BOOL flag, id completion) {
-                        if (vc) {
-                            NSString *clsName = NSStringFromClass([vc class]);
-                            if ([clsName containsString:@"OQZMeL2A9a"] || [clsName containsString:@"VNPShield"]) {
-                                RH_LOG("SmartBanking: [BLOCKED] presentation of %s", [clsName UTF8String]);
-                                return;
-                            }
-                            if (alertCls && [vc isKindOfClass:alertCls]) {
-                                NSString *title = @"";
-                                NSString *message = @"";
-                                @try {
-                                    id t = [vc valueForKey:@"title"];
-                                    if ([t isKindOfClass:[NSString class]]) title = t;
-                                    id m = [vc valueForKey:@"message"];
-                                    if ([m isKindOfClass:[NSString class]]) message = m;
-                                } @catch (id ex) {}
-
-                                if ([title containsString:@"b\u1ebb kh\u00f3a"] || [message containsString:@"b\u1ebb kh\u00f3a"] ||
-                                    [title containsString:@"Th\u00f4ng t\u01b0 77"] || [message containsString:@"Th\u00f4ng t\u01b0 77"] ||
-                                    [title containsString:@"77/2025"] || [message containsString:@"77/2025"] ||
-                                    [title containsString:@"TT-NHNN"] || [message containsString:@"TT-NHNN"] ||
-                                    [title containsString:@"Bootloader"] || [message containsString:@"Bootloader"] ||
-                                    [title containsString:@"C-2"] || [message containsString:@"C-2"] ||
-                                    [title containsString:@"Circular 77"] || [message containsString:@"Circular 77"]) {
-                                    RH_LOG("SmartBanking: [BLOCKED] UIAlertController with C-2 / Circular 77 root warning");
-                                    return;
-                                }
-                            }
-                        }
-                        ((void (*)(id, SEL, id, BOOL, id))orig_pvc)(_self, @selector(presentViewController:animated:completion:), vc, flag, completion);
-                    }));
-                    RH_LOG("SmartBanking: [SUCCESS] UIViewController presentViewController:animated:completion: hooked (anti-C2 modal shield)");
-                }
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
