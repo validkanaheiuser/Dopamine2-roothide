@@ -806,23 +806,6 @@ static Class replaced_objc_getClass_fn(const char *name) {
 //   replaced_sysctl calls __sysctl directly — same pattern as
 //   __sysctl_hook in roothider_common.c — no trampoline back to original needed.
 
-// ─── SmartBanking (BIDV) machine-level Circular 77 (C-2) replacements ────────
-// sub_100013728: Root environment scanner and Circular 77 (C-2) popup generator
-static void replaced_smartbanking_c2_scanner(void *arg0, void *arg1) {
-    RH_LOG("SmartBanking: [NEUTRALIZED] sub_100013728 called -> early return (Circular 77 C-2 popup permanently blocked at root)");
-}
-
-// tteMsVF8OF (0x1000138e8): The notification handler in WD9iCyDtai
-static void replaced_smartbanking_tteMsVF8OF(id _self, SEL _cmd, id notif) {
-    RH_LOG("SmartBanking: [NEUTRALIZED] tteMsVF8OF called -> NO-OP");
-}
-
-// 0x1000088d8: Check function returning 1 that triggers sub_100013728 -> force 0
-static int replaced_smartbanking_check_88d8(void) {
-    RH_LOG("SmartBanking: [NEUTRALIZED] 0x1000088d8 called -> return 0");
-    return 0;
-}
-
 // Write LDR X16,[PC+8]; BR X16; .quad addr to target's first 16 bytes.
 static bool hook_function_abs(void *target, void *replacement) {
     uintptr_t t = (uintptr_t)target;
@@ -1674,16 +1657,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     RH_LOG("SmartBanking: [SUCCESS] SecurityPackage checkDeviceAvailble hooked");
                 }
 
-                Method m_babrty = class_getInstanceMethod(secPkgCls, @selector(BABRTYB8324702D));
-                if (m_babrty) {
-                    method_setImplementation(m_babrty, imp_implementationWithBlock(^BOOL(id _self) {
-                        RH_LOG("SmartBanking: [SUCCESS] SecurityPackage BABRTYB8324702D intercepted -> NO");
-                        return NO;
-                    }));
-                    RH_LOG("SmartBanking: [SUCCESS] SecurityPackage BABRTYB8324702D hooked");
-                }
-
-                RH_LOG("SmartBanking: [SUCCESS] SecurityPackage GET_IS_JAILBREAK, isDidChangeColor, getColorCode, checklib, getMainCodeWithTs:phoneNo:, BABB8324702D, BABRTYB8324702D, checkDeviceAvailble hooked");
+                RH_LOG("SmartBanking: [SUCCESS] SecurityPackage GET_IS_JAILBREAK, isDidChangeColor, getColorCode, checklib, getMainCodeWithTs:phoneNo:, BABB8324702D, checkDeviceAvailble hooked");
             }
 
             Class sotpCls = objc_getClass("SOTP");
@@ -1765,45 +1739,11 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 RH_LOG("SmartBanking: [SUCCESS] VNPAddionalBodyData isHook hooked -> @\"0\"");
             }
 
-            // ── Machine-level neutralization of Circular 77 (C-2) popup ──
+            // ── Circular 77 / VNPShield Root Detection Neutralization (C-2 popup) ──
             // In SmartBanking (AppDelegateHandler+VNPShield.swift):
-            // 1. -[_TtC12SmartBanking10WD9iCyDtai tteMsVF8OF] (imp 0x1000138e8) handles app activation.
-            // 2. It checks 0x1000088d8 (returns 1). If 1, it calls sub_100013728.
-            // 3. sub_100013728 scans root indicators and presents vnpshield.circular.77.waring.message
-            //    via a custom Styleguide view hierarchy (not UIAlertController / modal).
-            // At constructor time, Swift classes like WD9iCyDtai are not yet registered with libobjc.
-            // hook_function_abs installs ARM64 inline trampolines directly into the __TEXT code bytes,
-            // permanently disabling the check, the trigger, and the popup generator at the machine level!
-            const struct mach_header *mainHeader = _dyld_get_image_header(0);
-            if (mainHeader) {
-                uintptr_t main_base = (uintptr_t)mainHeader;
-
-                // 1. sub_100013728: The root check & Circular 77 (C-2) popup generator
-                uint8_t *fn_c2 = (uint8_t *)(main_base + 0x13728);
-                if (fn_c2[0] == 0xfc && fn_c2[1] == 0x6f && fn_c2[2] == 0xba && fn_c2[3] == 0xa9) {
-                    hook_function_abs(fn_c2, (void *)replaced_smartbanking_c2_scanner);
-                    RH_LOG("SmartBanking: [SUCCESS] sub_100013728 machine hook installed at %p (C-2 popup generator neutralized)", fn_c2);
-                } else {
-                    RH_LOG("SmartBanking: [WARN] sub_100013728 signature mismatch: %02x %02x %02x %02x", fn_c2[0], fn_c2[1], fn_c2[2], fn_c2[3]);
-                }
-
-                // 2. tteMsVF8OF (0x1000138e8): The notification handler that calls sub_100013728
-                uint8_t *fn_tte = (uint8_t *)(main_base + 0x138e8);
-                if (fn_tte[0] == 0xf4 && fn_tte[1] == 0x4f && fn_tte[2] == 0xbe && fn_tte[3] == 0xa9) {
-                    hook_function_abs(fn_tte, (void *)replaced_smartbanking_tteMsVF8OF);
-                    RH_LOG("SmartBanking: [SUCCESS] tteMsVF8OF machine hook installed at %p", fn_tte);
-                } else {
-                    RH_LOG("SmartBanking: [WARN] tteMsVF8OF signature mismatch: %02x %02x %02x %02x", fn_tte[0], fn_tte[1], fn_tte[2], fn_tte[3]);
-                }
-
-                // 3. 0x1000088d8: Gate check returning 1 that permits calling sub_100013728 -> force 0
-                uint8_t *fn_88d8 = (uint8_t *)(main_base + 0x88d8);
-                if (fn_88d8[0] == 0x20 && fn_88d8[1] == 0x00 && fn_88d8[2] == 0x80 && fn_88d8[3] == 0x52) {
-                    hook_function_abs(fn_88d8, (void *)replaced_smartbanking_check_88d8);
-                    RH_LOG("SmartBanking: [SUCCESS] 0x1000088d8 check function hooked at %p (forced return 0)", fn_88d8);
-                }
-            }
-
+            // -[_TtC12SmartBanking10WD9iCyDtai tteMsVF8OF] (imp 0x1000138e8) calls sub_100013728
+            // which scans the environment/views and presents vnpshield.circular.77.waring.message (C-2).
+            // Hooking tteMsVF8OF to a NO-OP completely prevents sub_100013728 from ever running!
             Class wd9Cls = objc_getClass("_TtC12SmartBanking10WD9iCyDtai");
             if (wd9Cls) {
                 Method m_ttems = class_getInstanceMethod(wd9Cls, @selector(tteMsVF8OF));
@@ -1812,6 +1752,8 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                         RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10WD9iCyDtai tteMsVF8OF intercepted -> NO-OP (Circular 77 bypass)");
                     }));
                     RH_LOG("SmartBanking: [SUCCESS] _TtC12SmartBanking10WD9iCyDtai tteMsVF8OF hooked");
+                } else {
+                    RH_LOG("SmartBanking: [WARN] _TtC12SmartBanking10WD9iCyDtai tteMsVF8OF method not found");
                 }
             }
 
@@ -1866,27 +1808,6 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                         ((void (*)(id, SEL, id, BOOL, id))orig_pvc)(_self, @selector(presentViewController:animated:completion:), vc, flag, completion);
                     }));
                     RH_LOG("SmartBanking: [SUCCESS] UIViewController presentViewController:animated:completion: hooked (anti-C2 modal shield)");
-                }
-            }
-
-            // Universal custom view defense: intercept UIView addSubview:
-            // Blocks custom Styleguide popup views (s9pqySEHtL, DvUlnTdeoC) from being added to the view hierarchy
-            Class uiViewCls = objc_getClass("UIView");
-            if (uiViewCls) {
-                Method m_asv = class_getInstanceMethod(uiViewCls, @selector(addSubview:));
-                if (m_asv) {
-                    IMP orig_asv = method_getImplementation(m_asv);
-                    method_setImplementation(m_asv, imp_implementationWithBlock(^(id _self, id subview) {
-                        if (subview) {
-                            NSString *clsName = NSStringFromClass([subview class]);
-                            if ([clsName containsString:@"s9pqySEHtL"] || [clsName containsString:@"DvUlnTdeoC"]) {
-                                RH_LOG("SmartBanking: [BLOCKED] addSubview of %s (C-2 custom alert view blocked)", [clsName UTF8String]);
-                                return;
-                            }
-                        }
-                        ((void (*)(id, SEL, id))orig_asv)(_self, @selector(addSubview:), subview);
-                    }));
-                    RH_LOG("SmartBanking: [SUCCESS] UIView addSubview: hooked (C-2 custom view defense)");
                 }
             }
         }
