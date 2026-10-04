@@ -330,13 +330,12 @@ __attribute__((constructor)) static void initializer(void)
 		}
 	}
 
-	// Unset DYLD_INSERT_LIBRARIES, but only if systemhook itself is the only thing contained in it
-	// Feeable attempt at making jailbreak detection harder
+	// Unset DYLD_INSERT_LIBRARIES once all injected dylibs are mapped into the process.
+	// Prevents security detection routines (e.g. SmartBanking getenv("DYLD_INSERT_LIBRARIES"))
+	// from observing injected dylibs in the environment.
 	const char *dyldInsertLibraries = getenv("DYLD_INSERT_LIBRARIES");
 	if (dyldInsertLibraries) {
-		if (!strcmp(dyldInsertLibraries, HOOK_DYLIB_PATH)) {
-			unsetenv("DYLD_INSERT_LIBRARIES");
-		}
+		unsetenv("DYLD_INSERT_LIBRARIES");
 	}
 
 	// Apply posix_spawn / execve hooks

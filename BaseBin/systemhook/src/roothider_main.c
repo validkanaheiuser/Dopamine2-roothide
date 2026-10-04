@@ -6,6 +6,8 @@
 #include <errno.h>
 #include <sys/sysctl.h>
 #include <sys/proc_info.h>
+#include <sys/mount.h>
+#include <sys/syscall.h>
 #include <mach-o/dyld_images.h>
 #include <mach-o/loader.h>
 #include <mach/task.h>
@@ -441,21 +443,21 @@ static const char *const kBlockedAccessPaths[] = {
 // the substring "/var/lib/dpkg/"). All patterns are jailbreak-specific; no
 // legitimate banking-app access to these path components exists.
 static const char *const kBlockedPathPatterns[] = {
-    "/var/jb/",                 // any path under the /var/jb bind-mount
+    "/var/jb",                  // any path under or referencing /var/jb
     "/.jbroot-",                // direct jbroot path (.jbroot-XXXX/...)
-    "/var/lib/dpkg/",           // dpkg package database (cekL3Int)
-    "/var/lib/apt/",            // apt package lists (cekL3Int)
-    "/etc/apt/",                // apt configuration (also at /var/jb/etc/apt via bind)
+    "/var/lib/dpkg",            // dpkg package database (cekL3Int)
+    "/var/lib/apt",             // apt package lists (cekL3Int)
+    "/etc/apt",                 // apt configuration (also at /var/jb/etc/apt via bind)
     "/Applications/Cydia.app",  // Cydia jailbreak package manager
     "/Applications/Zebra.app",  // Zebra package manager (BSZInspection)
     "/Applications/Sileo.app",  // Sileo package manager (BSZInspection)
     "/usr/share/zebra/",        // Zebra data directory (BSZInspection)
-    "/Library/MobileSubstrate/",// MobileSubstrate/ElleKit tweak inject path
-    "/usr/lib/TweakInject/",    // TweakInject path (alternate substrate path)
+    "/Library/MobileSubstrate", // MobileSubstrate/ElleKit tweak inject path
+    "/usr/lib/TweakInject",     // TweakInject path (alternate substrate path)
     "/usr/sbin/",               // Daemon path (cfprefsd, sshd, sandbox escape check)
     "/bin/sh",
     "/bin/bash",
-    "/etc/ssh/",
+    "/etc/ssh",
     NULL
 };
 
@@ -543,6 +545,142 @@ static pid_t hook_fork(void) {
     return (pid_t)syscall(SYS_fork);
 }
 
+// ─── readlink() hook: block /var/jb and jailbreak symlink detection ─────────
+// SmartBanking (+[KMB d_mb]) calls readlink("/var/jb", buf, 0x2000). On rootless,
+// /var/jb is a symlink pointing to the jbroot directory. Returning the symlink
+// target alerts the RASP check and caches the jailbreak path.
+// When hiding jailbreak, return ENOENT as on a clean, stock iOS device.
+#ifndef SYS_readlink
+#define SYS_readlink 58
+#endif
+
+static ssize_t hook_readlink(const char *path, char *buf, size_t bufsiz) {
+    if (gShouldHideJailbreak && path) {
+        if (strcmp(path, "/var/jb") == 0 || strncmp(path, "/var/jb/", 8) == 0) {
+            RH_LOG("readlink BLOCKED: %s", path);
+            errno = ENOENT;
+            return -1;
+        }
+        for (int i = 0; kBlockedPathPatterns[i]; i++) {
+            if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
+                RH_LOG("readlink BLOCKED(pattern=%s): %s", kBlockedPathPatterns[i], path);
+                errno = ENOENT;
+                return -1;
+            }
+        }
+    }
+    return (ssize_t)syscall(SYS_readlink, path, buf, bufsiz);
+}
+
+// ─── getenv() hook: hide DYLD_INSERT_LIBRARIES and jailbreak env vars ────────
+// SmartBanking 0x102A3814C (0x102a39574) explicitly calls
+// getenv("DYLD_INSERT_LIBRARIES"). If non-NULL, it sets flag 0x1102 (detected).
+// In addition, other security suites probe for FRIDA, CYDIA, SUBSTRATE, JBROOT.
+// Iterating environ directly requires no trampoline and returns NULL for JB vars.
+extern char **environ;
+
+static char *hook_getenv(const char *name) {
+    if (!name || name[0] == '\0') return NULL;
+    if (gShouldHideJailbreak) {
+        if (strcmp(name, "DYLD_INSERT_LIBRARIES") == 0 ||
+            strcmp(name, "DYLD_PRINT_TO_FILE") == 0 ||
+            strcmp(name, "DYLD_FRAMEWORK_PATH") == 0 ||
+            strcmp(name, "DYLD_LIBRARY_PATH") == 0 ||
+            strstr(name, "FRIDA") != NULL ||
+            strstr(name, "CYDIA") != NULL ||
+            strstr(name, "SUBSTRATE") != NULL ||
+            strstr(name, "ROOTHIDE") != NULL ||
+            strstr(name, "JBROOT") != NULL) {
+            RH_LOG("getenv BLOCKED: %s", name);
+            return NULL;
+        }
+    }
+    if (!environ) return NULL;
+    size_t len = strlen(name);
+    for (char **ep = environ; *ep != NULL; ep++) {
+        if (strncmp(*ep, name, len) == 0 && (*ep)[len] == '=') {
+            return &(*ep)[len + 1];
+        }
+    }
+    return NULL;
+}
+
+// ─── getmntinfo() hook: filter rootless/jailbreak and snapshot mount points ──
+// SmartBanking 0x102A3814C (0x102a38218) inspects getmntinfo mount points:
+// 1. Checks if f_mntfromname of non-root mounts contains '@' (snapshot detection).
+// 2. Checks if two mount points have duplicate f_mntfromname (bind-mount detection).
+// Any match sets w22 to 0x16 or 0x17, tripping Circular 77 detection.
+static struct statfs *gCleanMntBuf = NULL;
+static int gCleanMntCount = 0;
+
+static int hook_getmntinfo(struct statfs **mntbufp, int flags) {
+    if (!mntbufp) return 0;
+
+    int count = getfsstat(NULL, 0, MNT_NOWAIT);
+    if (count <= 0) return 0;
+
+    int bufsize = (count + 4) * sizeof(struct statfs);
+    struct statfs *rawbuf = (struct statfs *)malloc(bufsize);
+    if (!rawbuf) return 0;
+
+    int real_count = getfsstat(rawbuf, bufsize, flags);
+    if (real_count <= 0) {
+        free(rawbuf);
+        return 0;
+    }
+
+    if (!gShouldHideJailbreak) {
+        if (gCleanMntBuf) free(gCleanMntBuf);
+        gCleanMntBuf = rawbuf;
+        gCleanMntCount = real_count;
+        *mntbufp = gCleanMntBuf;
+        return real_count;
+    }
+
+    struct statfs *cleanbuf = (struct statfs *)malloc(bufsize);
+    if (!cleanbuf) {
+        free(rawbuf);
+        return 0;
+    }
+
+    int clean_count = 0;
+    for (int i = 0; i < real_count; i++) {
+        const char *on = rawbuf[i].f_mntonname;
+        const char *from = rawbuf[i].f_mntfromname;
+
+        // Filter out jailbreak mounts
+        if (strstr(on, "/var/jb") || strstr(on, "jbroot") || strstr(on, "basebin") ||
+            strstr(from, "/var/jb") || strstr(from, "jbroot") || strstr(from, "basebin")) {
+            continue;
+        }
+
+        // For non-root mounts, filter out snapshot '@' mounts (detected by SmartBanking)
+        if (strcmp(on, "/") != 0 && strchr(from, '@') != NULL) {
+            continue;
+        }
+
+        // Filter out duplicate from-name mounts (bind mount detection)
+        bool duplicate = false;
+        for (int j = 0; j < clean_count; j++) {
+            if (strcmp(from, cleanbuf[j].f_mntfromname) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+
+        cleanbuf[clean_count++] = rawbuf[i];
+    }
+
+    free(rawbuf);
+    if (gCleanMntBuf) free(gCleanMntBuf);
+    gCleanMntBuf = cleanbuf;
+    gCleanMntCount = clean_count;
+    *mntbufp = gCleanMntBuf;
+    RH_LOG("getmntinfo filtered %d -> %d mounts", real_count, clean_count);
+    return clean_count;
+}
+
 // ─── Fix B: dyld image-list hooks to hide jailbreak dylibs from MC1 ──────────
 //
 // MC1 (inside blueshield.framework) calls _dyld_image_count() and
@@ -562,37 +700,15 @@ static const struct dyld_all_image_infos *get_image_infos(void) {
 
 static bool is_jailbreak_image(const char *path) {
     if (!path) return false;
-    // dyld_all_image_infos.infoArray[i].imageFilePath holds the path as passed to
-    // dlopen(), without resolving bind mounts. "/var/jb/" is the bind-mount path
-    // used by older jailbreaks (Unc0ver, Taurine). On RootHide/Dopamine, JBROOT_PATH
-    // expands to /var/containers/Bundle/Application/.jbroot-UUID/... but the
-    // /.jbroot- check further below catches those. This check covers legacy jailbreaks
-    // and any bind-mount remnant still appearing as /var/jb/.
-    if (strstr(path, "/var/jb/") != NULL) return true;
-    // Covers /basebin/ paths that appear without the full jbroot prefix (e.g. if a
-    // dylib is loaded via a bind-mounted /basebin/ path).
+    if (strstr(path, "/var/jb") != NULL) return true;
     if (strstr(path, "/basebin/") != NULL) return true;
-    // systemhook.dylib is loaded via DYLD_INSERT_LIBRARIES. Its path may appear as
-    // "/var/jb/usr/lib/systemhook-<UUID>.dylib" (caught by "/var/jb/" above) or
-    // as the bind-mounted "/usr/lib/systemhook-<UUID>.dylib" if the environment
-    // variable used the bind-mount path. This check covers that second case.
-    if (strstr(path, "/usr/lib/systemhook-") != NULL) return true;
-    // MWkpr (0x6ae0 in blueshield.framework, DOPAMINE_WEAKNESS_2.md reason=4)
-    // explicitly scans for dylibs under these two paths. TweakLoader may dlopen
-    // tweaks via the bind-mounted path (without the /var/jb/ prefix), so they
-    // appear in dyld_all_image_infos as /usr/lib/TweakInject/<foo>.dylib or
-    // /Library/MobileSubstrate/DynamicLibraries/<foo>.dylib.
-    if (strstr(path, "/usr/lib/TweakInject/") != NULL) return true;
-    if (strstr(path, "/Library/MobileSubstrate/") != NULL) return true;
-    // Dopamine/RootHide jbroot prefix — catches any dylib whose path passes
-    // through the .jbroot-UUID directory, regardless of bind-mount status.
-    // Covers roothideinit, roothidehooks, and CydiaSubstrate.framework
-    // (roothidehooks.dylib LC_LOAD_DYLIB: @rpath/CydiaSubstrate.framework/
-    // CydiaSubstrate; LC_RPATH: @loader_path/.jbroot/Library/Frameworks →
-    // expands through .jbroot-UUID). Consistent with kBlockedPathPatterns
-    // (line 427) which uses the same /.jbroot- pattern for hook_access.
-    // MC1 isFrameworkAvailable (0x20790 in blueshield) scans dyld image
-    // names for "CydiaSubstrate" / "ElleKit" (DOPAMINE_WEAKNESS_3.md §A.2).
+    if (strstr(path, "systemhook") != NULL) return true;
+    if (strstr(path, "roothide") != NULL) return true;
+    if (strstr(path, "/usr/lib/TweakInject") != NULL) return true;
+    if (strstr(path, "/Library/MobileSubstrate") != NULL) return true;
+    if (strstr(path, "CydiaSubstrate") != NULL) return true;
+    if (strstr(path, "libsubstrate") != NULL) return true;
+    if (strstr(path, "ellekit") != NULL) return true;
     if (strstr(path, "/.jbroot-") != NULL) return true;
     return false;
 }
@@ -1328,6 +1444,7 @@ void roothide_init()
 		if(DYLD_IN_CACHE && strcmp(DYLD_IN_CACHE, "0") == 0) {
 			unsetenv("DYLD_IN_CACHE");
 		}
+		unsetenv("DYLD_INSERT_LIBRARIES");
 	}
 
 	HOOK_DYLIB_PATH = strdup(dyld_image_path_containing_address(&__dso_handle));
@@ -1446,6 +1563,15 @@ void roothide_init_with_executable(const char* executable)
 		// Fix A: hook access() for IOSSecuritySuite file-existence checks.
 		litehook_hook_function(access, hook_access);
 		RH_LOG("hook_access installed");
+
+		litehook_hook_function(readlink, hook_readlink);
+		RH_LOG("hook_readlink installed");
+
+		litehook_hook_function(getenv, hook_getenv);
+		RH_LOG("hook_getenv installed");
+
+		litehook_hook_function(getmntinfo, hook_getmntinfo);
+		RH_LOG("hook_getmntinfo installed");
 
 		// reason=0 cekL2Int: block fork() to clear the fork-success jailbreak bit.
 		litehook_hook_function(fork, hook_fork);
