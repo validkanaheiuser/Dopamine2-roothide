@@ -8,6 +8,7 @@
 #include <sys/proc_info.h>
 #include <sys/mount.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <mach-o/dyld_images.h>
 #include <mach-o/loader.h>
 #include <mach/task.h>
@@ -43,6 +44,14 @@ static inline void rh_log(const char *fmt, ...) {
 #include "envbuf.h"
 #include "sandbox.h"
 #include "roothider.h"
+
+// Direct syscall numbers for bypassing hooked libc wrappers (arm64, xnu):
+#ifndef SYS_stat64
+#define SYS_stat64      338
+#define SYS_lstat64     340
+#define SYS_statfs64    345
+#define SYS_getfsstat64 347
+#endif
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // DOPAMINE_WEAKNESS.md — Coverage Audit
@@ -458,6 +467,26 @@ static const char *const kBlockedPathPatterns[] = {
     "/bin/sh",
     "/bin/bash",
     "/etc/ssh",
+    // XOR-decoded path list from sub_102A3814C (BIDV BlueShield telemetry scanner):
+    "frida",
+    "/var/apt",
+    "/var/dpkg",
+    "/var/etc",
+    "/var/Lib",
+    "/var/libexec",
+    "/var/Library",
+    "/var/sbin",
+    "/var/share",
+    "/var/ssh",
+    "/var/usr",
+    "/var/master.passwd",
+    "/var/sudo_logsrvd.conf",
+    "/var/suid_profile",
+    "/var/zlogin",
+    "/var/zlogout",
+    "/var/zprofile",
+    "/var/zshenv",
+    "/var/zshrc",
     NULL
 };
 
@@ -605,6 +634,31 @@ static char *hook_getenv(const char *name) {
     return NULL;
 }
 
+// ─── stat/lstat hooks: block jailbreak paths → ENOENT ─────────────────────────
+// sub_102A3814C XOR-decodes path lists and calls stat/lstat to verify JB artifacts.
+// Returning ENOENT for blocked patterns makes the "file exists" checks pass cleanly.
+static int hook_stat(const char *path, struct stat *buf) {
+    if (gShouldHideJailbreak && path) {
+        for (int i = 0; kBlockedPathPatterns[i]; i++) {
+            if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
+                errno = ENOENT; return -1;
+            }
+        }
+    }
+    return (int)syscall(SYS_stat64, path, buf);
+}
+
+static int hook_lstat(const char *path, struct stat *buf) {
+    if (gShouldHideJailbreak && path) {
+        for (int i = 0; kBlockedPathPatterns[i]; i++) {
+            if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
+                errno = ENOENT; return -1;
+            }
+        }
+    }
+    return (int)syscall(SYS_lstat64, path, buf);
+}
+
 // ─── getmntinfo() hook: filter rootless/jailbreak and snapshot mount points ──
 // SmartBanking 0x102A3814C (0x102a38218) inspects getmntinfo mount points:
 // 1. Checks if f_mntfromname of non-root mounts contains '@' (snapshot detection).
@@ -678,6 +732,64 @@ static int hook_getmntinfo(struct statfs **mntbufp, int flags) {
     gCleanMntCount = clean_count;
     *mntbufp = gCleanMntBuf;
     RH_LOG("getmntinfo filtered %d -> %d mounts", real_count, clean_count);
+    return clean_count;
+}
+
+// ─── statfs hook: normalize mount metadata (reasons 66 and 78) ────────────────
+// sub_102A3814C checks statfs results for two conditions:
+//   reason=66: f_flags & MNT_RDONLY == 0  (root FS not read-only)
+//   reason=78: f_mntonname != "/"          (mount point is not "/")
+// On Dopamine the root FS is mounted r/w and overlaid with a snapshot, so raw
+// statfs reveals the jailbreak. Normalize all results to look like stock iOS.
+static int hook_statfs(const char *path, struct statfs *buf) {
+    if (!path || !buf) { errno = EFAULT; return -1; }
+    if (gShouldHideJailbreak) {
+        if (strstr(path, "/var/jb") != NULL || strncmp(path, "/.jbroot-", 9) == 0) {
+            errno = ENOENT; return -1;
+        }
+        for (int i = 0; kBlockedPathPatterns[i]; i++) {
+            if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
+                errno = ENOENT; return -1;
+            }
+        }
+    }
+    int ret = (int)syscall(SYS_statfs64, path, buf);
+    if (ret == 0 && gShouldHideJailbreak) {
+        char *at = strchr(buf->f_mntfromname, '@');
+        if (at) *at = '\0';
+        strncpy(buf->f_mntonname, "/", sizeof(buf->f_mntonname) - 1);
+        buf->f_mntonname[sizeof(buf->f_mntonname) - 1] = '\0';
+        buf->f_flags |= MNT_RDONLY;
+    }
+    return ret;
+}
+
+// ─── getfsstat hook: filter jailbreak mounts (VisaMobileFoundation) ───────────
+// VisaMobileFoundation's FileChecker calls getfsstat directly (bypassing
+// hook_getmntinfo which only intercepts the libc wrapper).
+static int hook_getfsstat(struct statfs *buf, int bufsize, int flags) {
+    int count = (int)syscall(SYS_getfsstat64, buf, bufsize, flags);
+    if (count <= 0 || !buf || !gShouldHideJailbreak) return count;
+
+    int clean_count = 0;
+    for (int i = 0; i < count; i++) {
+        const char *on   = buf[i].f_mntonname;
+        const char *from = buf[i].f_mntfromname;
+
+        if (strstr(on, "/var/jb") || strstr(on, "jbroot") || strstr(on, "basebin") ||
+            strstr(from, "/var/jb") || strstr(from, "jbroot") || strstr(from, "basebin"))
+            continue;
+        if (strcmp(on, "/") != 0 && strchr(from, '@') != NULL)
+            continue;
+
+        bool dup = false;
+        for (int j = 0; j < clean_count; j++) {
+            if (strcmp(from, buf[j].f_mntfromname) == 0) { dup = true; break; }
+        }
+        if (dup) continue;
+
+        buf[clean_count++] = buf[i];
+    }
     return clean_count;
 }
 
@@ -1572,6 +1684,16 @@ void roothide_init_with_executable(const char* executable)
 
 		litehook_hook_function(getmntinfo, hook_getmntinfo);
 		RH_LOG("hook_getmntinfo installed");
+
+		litehook_hook_function(stat, hook_stat);
+		litehook_hook_function(lstat, hook_lstat);
+		RH_LOG("hook_stat/lstat installed");
+
+		litehook_hook_function(statfs, hook_statfs);
+		RH_LOG("hook_statfs installed");
+
+		litehook_hook_function(getfsstat, hook_getfsstat);
+		RH_LOG("hook_getfsstat installed");
 
 		// reason=0 cekL2Int: block fork() to clear the fork-success jailbreak bit.
 		litehook_hook_function(fork, hook_fork);

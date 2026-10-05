@@ -857,6 +857,17 @@ static bool hook_function_abs(void *target, void *replacement) {
     return true;
 }
 
+// ─── WrapperSecLib +res pass-through IMP ──────────────────────────────────────
+static IMP s_orig_WrapperSecLib_res = NULL;
+
+// ─── VisaMobileFoundation SecurityDetector replacement functions ──────────────
+// Swift Bool = int8_t (1-byte), 0=false. All return false (not jailbroken/hooked).
+static int8_t vmf_replaced_isJailbreak(void *self)          { (void)self; return 0; }
+static int8_t vmf_replaced_amIReverseEngineered(void *self) { (void)self; return 0; }
+static int8_t vmf_replaced_amIProxied(void *self)           { (void)self; return 0; }
+static int8_t vmf_replaced_amIRunInEmulator(void *self)     { (void)self; return 0; }
+static int8_t vmf_replaced_amIDebugged(void *self)          { (void)self; return 0; }
+
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
     const char *progname = getprogname();
@@ -1778,6 +1789,65 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     }));
                 }
                 RH_LOG("SmartBanking: [SUCCESS] VNPAddionalBodyData isHook hooked -> @\"0\"");
+            }
+
+            // ── Hook +[WrapperSecLib res] (BIDV BlueShield telemetry bypass) ──────────
+            // IDA-verified (8h0z): +[SecurityPackage res] (0x102474618) is a one-liner
+            // that calls +[WrapperSecLib res] (0x102a3c260), which calls sub_102A3814C
+            // (~85 KB telemetry scanner). Hooking here covers both callers.
+            // Pass-through: sub_102A3814C runs with the cleaned syscall environment
+            // (hook_access / hook_statfs / hook_getmntinfo) and produces valid=1/reason=0
+            // JSON with a correct sign field the server can verify.
+            {
+                Class wrpCls = objc_getClass("WrapperSecLib");
+                if (wrpCls) {
+                    Method m_res = class_getClassMethod(wrpCls, @selector(res));
+                    if (m_res) {
+                        s_orig_WrapperSecLib_res = method_getImplementation(m_res);
+                        method_setImplementation(m_res, imp_implementationWithBlock(
+                            ^NSString *(id _cls) {
+                                if (s_orig_WrapperSecLib_res) {
+                                    return ((NSString*(*)(id,SEL))s_orig_WrapperSecLib_res)(
+                                        _cls, @selector(res));
+                                }
+                                return @"{\"valid\":\"1\",\"reason\":\"0\"}";
+                            }
+                        ));
+                        RH_LOG("WrapperSecLib +res hooked (BlueShield telemetry pass-through)");
+                    } else {
+                        RH_LOG("WrapperSecLib +res: class method NOT FOUND");
+                    }
+                } else {
+                    RH_LOG("WrapperSecLib class NOT FOUND");
+                }
+            }
+
+            // ── Hook VisaMobileFoundation SecurityDetector (pure Swift class) ─────────
+            // IDA-verified (a8un): SecurityDetector is a pure Swift class with no ObjC
+            // bridge. Hook via dlsym on mangled Swift symbols + MSHookFunction.
+            {
+                static const struct { const char *sym; void *repl; } kVMFHooks[] = {
+                    { "$s20VisaMobileFoundation16SecurityDetectorC11isJailbreakSbyF",
+                      (void*)vmf_replaced_isJailbreak },
+                    { "$s20VisaMobileFoundation16SecurityDetectorC20amIReverseEngineeredSbyF",
+                      (void*)vmf_replaced_amIReverseEngineered },
+                    { "$s20VisaMobileFoundation16SecurityDetectorC10amIProxiedSbyF",
+                      (void*)vmf_replaced_amIProxied },
+                    { "$s20VisaMobileFoundation16SecurityDetectorC16amIRunInEmulatorSbyF",
+                      (void*)vmf_replaced_amIRunInEmulator },
+                    { "$s20VisaMobileFoundation16SecurityDetectorC11amIDebuggedSbyF",
+                      (void*)vmf_replaced_amIDebugged },
+                    { NULL, NULL }
+                };
+                for (int i = 0; kVMFHooks[i].sym; i++) {
+                    void *sym = dlsym(RTLD_DEFAULT, kVMFHooks[i].sym);
+                    if (sym) {
+                        MSHookFunction(sym, kVMFHooks[i].repl, NULL);
+                        RH_LOG("VisaMobileFoundation %s hooked", kVMFHooks[i].sym);
+                    } else {
+                        RH_LOG("VisaMobileFoundation %s: NOT FOUND", kVMFHooks[i].sym);
+                    }
+                }
             }
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
