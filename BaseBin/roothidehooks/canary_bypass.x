@@ -857,8 +857,7 @@ static bool hook_function_abs(void *target, void *replacement) {
     return true;
 }
 
-// ─── WrapperSecLib +res pass-through IMP ──────────────────────────────────────
-static IMP s_orig_WrapperSecLib_res = NULL;
+// (pass-through IMP removed — hook returns hardcoded clean JSON directly)
 
 // ─── VisaMobileFoundation SecurityDetector replacement functions ──────────────
 // Swift Bool = int8_t (1-byte), 0=false. All return false (not jailbroken/hooked).
@@ -1794,26 +1793,20 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             // ── Hook +[WrapperSecLib res] (BIDV BlueShield telemetry bypass) ──────────
             // IDA-verified (8h0z): +[SecurityPackage res] (0x102474618) is a one-liner
             // that calls +[WrapperSecLib res] (0x102a3c260), which calls sub_102A3814C
-            // (~85 KB telemetry scanner). Hooking here covers both callers.
-            // Pass-through: sub_102A3814C runs with the cleaned syscall environment
-            // (hook_access / hook_statfs / hook_getmntinfo) and produces valid=1/reason=0
-            // JSON with a correct sign field the server can verify.
+            // (~85 KB telemetry scanner). Return hardcoded clean JSON directly —
+            // passing through to sub_102A3814C risks residual reason codes slipping
+            // through even with syscall hooks active.
             {
                 Class wrpCls = objc_getClass("WrapperSecLib");
                 if (wrpCls) {
                     Method m_res = class_getClassMethod(wrpCls, @selector(res));
                     if (m_res) {
-                        s_orig_WrapperSecLib_res = method_getImplementation(m_res);
                         method_setImplementation(m_res, imp_implementationWithBlock(
                             ^NSString *(id _cls) {
-                                if (s_orig_WrapperSecLib_res) {
-                                    return ((NSString*(*)(id,SEL))s_orig_WrapperSecLib_res)(
-                                        _cls, @selector(res));
-                                }
-                                return @"{\"valid\":\"1\",\"reason\":\"0\"}";
+                                return @"{\"valid\":\"1\",\"reason\":\"0\",\"v1\":\"0\",\"v2\":\"0\",\"v3\":\"0\",\"v4\":\"0\",\"v5\":\"0\",\"sign\":\"0\",\"t\":\"0\",\"x\":\"0\"}";
                             }
                         ));
-                        RH_LOG("WrapperSecLib +res hooked (BlueShield telemetry pass-through)");
+                        RH_LOG("WrapperSecLib +res hooked -> clean JSON");
                     } else {
                         RH_LOG("WrapperSecLib +res: class method NOT FOUND");
                     }
