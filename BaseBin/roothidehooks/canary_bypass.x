@@ -361,7 +361,11 @@ static NSArray *replaced_contentsOfDirectoryAtPath(id self, SEL sel, NSString *p
     if (!result || [result count] == 0) return result;
     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:[result count]];
     for (NSString *entry in result) {
-        if (!jailbreakBypassShouldBlockPath(entry)) {
+        // entry is a RELATIVE name (e.g. "jb"); construct the full path before
+        // checking so strstr("/var/jb", "/var/jb") matches instead of
+        // strstr("jb", "/var/jb/") == NULL (the old bug that let "jb" through).
+        NSString *fullPath = [path stringByAppendingPathComponent:entry];
+        if (!jailbreakBypassShouldBlockPath(fullPath)) {
             [filtered addObject:entry];
         }
     }
@@ -376,7 +380,8 @@ static NSArray *replaced_subpathsOfDirectoryAtPath(id self, SEL sel, NSString *p
     if (!result || [result count] == 0) return result;
     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:[result count]];
     for (NSString *entry in result) {
-        if (!jailbreakBypassShouldBlockPath(entry)) {
+        NSString *fullPath = [path stringByAppendingPathComponent:entry];
+        if (!jailbreakBypassShouldBlockPath(fullPath)) {
             [filtered addObject:entry];
         }
     }
@@ -391,7 +396,8 @@ static NSArray *replaced_subpathsAtPath(id self, SEL sel, NSString *path) {
     if (!result || [result count] == 0) return result;
     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:[result count]];
     for (NSString *entry in result) {
-        if (!jailbreakBypassShouldBlockPath(entry)) {
+        NSString *fullPath = [path stringByAppendingPathComponent:entry];
+        if (!jailbreakBypassShouldBlockPath(fullPath)) {
             [filtered addObject:entry];
         }
     }
@@ -1788,6 +1794,36 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     }));
                 }
                 RH_LOG("SmartBanking: [SUCCESS] VNPAddionalBodyData isHook hooked -> @\"0\"");
+            }
+
+            // ── Hook +[KMB d_mb] (BIDV persistent symlink detector) ──────────────────
+            // IDA-verified (rflm 0x102A3C134): +[KMB d_mb] calls readlink("/var/jb"),
+            // writes the symlink target to NSUserDefaults key "/var/jb", then reads
+            // it back and calls access() → returns 11 (JAILBREAK) or 5 (CLEAN).
+            // The NSUserDefaults write persists across app launches in
+            // Library/Preferences/com.bidv.smartbanking.plist; even with readlink
+            // blocked, the saved path from a prior run causes access() to return 0
+            // → returns 11 every time. Two fixes:
+            //   1. Hook d_mb → always return 5 (CLEAN).
+            //   2. Clear the persisted NSUserDefaults key immediately.
+            {
+                Class kmbCls = objc_getClass("KMB");
+                if (kmbCls) {
+                    Method m_dmb = class_getClassMethod(kmbCls, @selector(d_mb));
+                    if (m_dmb) {
+                        method_setImplementation(m_dmb, imp_implementationWithBlock(^int(id _cls) {
+                            return 5; // CLEAN
+                        }));
+                        RH_LOG("SmartBanking: [SUCCESS] KMB d_mb hooked -> 5 (CLEAN)");
+                    } else {
+                        RH_LOG("SmartBanking: KMB d_mb method NOT FOUND");
+                    }
+                } else {
+                    RH_LOG("SmartBanking: KMB class NOT FOUND");
+                }
+                // Clear the persisted /var/jb target written by previous runs of d_mb.
+                [[NSUserDefaults standardUserDefaults] removeObjectForKey:@"/var/jb"];
+                RH_LOG("SmartBanking: NSUserDefaults /var/jb key cleared");
             }
 
             // ── +[WrapperSecLib res] — NOT hooked (pass-through) ─────────────────────

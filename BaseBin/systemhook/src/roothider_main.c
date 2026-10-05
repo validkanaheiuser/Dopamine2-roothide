@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <libgen.h>
 #include <errno.h>
+#include <dirent.h>
 #include <sys/sysctl.h>
 #include <sys/proc_info.h>
 #include <sys/mount.h>
@@ -487,6 +488,19 @@ static const char *const kBlockedPathPatterns[] = {
     "/var/zprofile",
     "/var/zshenv",
     "/var/zshrc",
+    // IDA-verified (rflm off_105B45D08): remaining 10 paths from the 28-entry loop
+    // that were absent from the list above. /var/cache and /var/master.passwd exist
+    // on stock iOS — blocking them here only for gShouldHideJailbreak callers.
+    "/var/bin",
+    "/var/bzip2",
+    "/var/cache",
+    "/var/gzip",
+    "/var/LIY",
+    "/var/Liy",
+    "/var/newuser",
+    "/var/profile",
+    "/var/sh",
+    "/var/sy",
     NULL
 };
 
@@ -599,6 +613,64 @@ static ssize_t hook_readlink(const char *path, char *buf, size_t bufsiz) {
         }
     }
     return (ssize_t)syscall(SYS_readlink, path, buf, bufsiz);
+}
+
+// ─── opendir()/readdir() hooks: hide jailbreak entries from directory scans ───
+// sub_1026A36A4 (k3is4f9G0b, "Directory queue had null entry.") calls
+// opendir/readdir on /var and descendant directories. Even when hook_access
+// blocks the actual path checks, the scanner can enumerate "jb" from readdir
+// on /var and flag the device based on the entry name alone (log 11:16:11).
+//
+// Fix:
+//   hook_opendir — blocks opening /var/jb and any blocked-pattern directories.
+//   hook_readdir — skips any dirent whose d_name is "jb", starts with ".jbroot-",
+//                  or matches other jailbreak component names.
+//
+// Both use callerIsJBDylib guard to avoid breaking libroothide.
+// orig_opendir/orig_readdir obtained via dlsym(RTLD_DEFAULT) before hooking —
+// dlsym returns the real function body address (not the PLT stub), so calling
+// orig_*() from the hooks bypasses the patched stub and reaches the real impl.
+static DIR *(*orig_opendir)(const char *name) = NULL;
+static struct dirent *(*orig_readdir)(DIR *dirp) = NULL;
+
+static DIR *hook_opendir(const char *name) {
+    if (gShouldHideJailbreak && name) {
+        Dl_info callerInfo;
+        bool callerIsJBDylib = (dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
+                                callerInfo.dli_fname != NULL &&
+                                strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
+        if (!callerIsJBDylib) {
+            for (int i = 0; kBlockedPathPatterns[i]; i++) {
+                if (strstr(name, kBlockedPathPatterns[i]) != NULL) {
+                    RH_LOG("opendir BLOCKED: %s", name);
+                    errno = ENOENT;
+                    return NULL;
+                }
+            }
+        }
+    }
+    return orig_opendir ? orig_opendir(name) : NULL;
+}
+
+static struct dirent *hook_readdir(DIR *dirp) {
+    if (!gShouldHideJailbreak || !orig_readdir) {
+        return orig_readdir ? orig_readdir(dirp) : NULL;
+    }
+    while (1) {
+        struct dirent *entry = orig_readdir(dirp);
+        if (!entry) return NULL;
+        const char *name = entry->d_name;
+        if (strcmp(name, "jb") == 0 ||
+            strncmp(name, ".jbroot-", 8) == 0 ||
+            strcmp(name, "basebin") == 0 ||
+            strstr(name, "roothide") != NULL ||
+            strstr(name, "TweakInject") != NULL ||
+            strstr(name, "jbinit") != NULL) {
+            RH_LOG("readdir HIDDEN: %s", name);
+            continue;
+        }
+        return entry;
+    }
 }
 
 // ─── getenv() hook: hide DYLD_INSERT_LIBRARIES and jailbreak env vars ────────
@@ -1626,6 +1698,14 @@ void roothide_init_with_executable(const char* executable)
 
 		litehook_hook_function(statfs, hook_statfs);
 		RH_LOG("hook_statfs installed");
+
+		orig_opendir = (DIR *(*)(const char *))dlsym(RTLD_DEFAULT, "opendir");
+		litehook_hook_function(opendir, hook_opendir);
+		RH_LOG("hook_opendir installed");
+
+		orig_readdir = (struct dirent *(*)(DIR *))dlsym(RTLD_DEFAULT, "readdir");
+		litehook_hook_function(readdir, hook_readdir);
+		RH_LOG("hook_readdir installed");
 
 		// reason=0 cekL2Int: block fork() to clear the fork-success jailbreak bit.
 		litehook_hook_function(fork, hook_fork);
