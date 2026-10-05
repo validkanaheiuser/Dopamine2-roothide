@@ -8,6 +8,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dirent.h>
 #include <errno.h>
 #include <unistd.h>
 #include <sys/sysctl.h>
@@ -921,6 +922,41 @@ static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide)
     }
 }
 
+// ─── opendir()/readdir() hooks via MSHookFunction (real trampolines) ─────────
+// litehook patches function bodies in-place; calling orig_* from within a litehook
+// causes infinite recursion. MSHookFunction allocates a real trampoline so
+// orig_opendir/orig_readdir are safe to call from within the hooks.
+//
+// Moved from roothider_main.c (litehook) to here (MSHookFunction).
+static DIR *(*orig_opendir)(const char *name) = NULL;
+static struct dirent *(*orig_readdir)(DIR *dirp) = NULL;
+
+static DIR *replaced_opendir(const char *name) {
+    if (name && jailbreakBypassShouldBlockPath([NSString stringWithUTF8String:name])) {
+        errno = ENOENT;
+        return NULL;
+    }
+    return orig_opendir ? orig_opendir(name) : NULL;
+}
+
+static struct dirent *replaced_readdir(DIR *dirp) {
+    if (!orig_readdir) return NULL;
+    while (1) {
+        struct dirent *entry = orig_readdir(dirp);
+        if (!entry) return NULL;
+        const char *name = entry->d_name;
+        if (strcmp(name, "jb") == 0 ||
+            strncmp(name, ".jbroot-", 8) == 0 ||
+            strcmp(name, "basebin") == 0 ||
+            strstr(name, "roothide") != NULL ||
+            strstr(name, "TweakInject") != NULL ||
+            strstr(name, "jbinit") != NULL) {
+            continue;
+        }
+        return entry;
+    }
+}
+
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
     const char *progname = getprogname();
@@ -929,6 +965,12 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                            (bundleId && [bundleId localizedCaseInsensitiveContainsString:@"smartbanking"]);
 
     RH_LOG("logScanBypassInit called (prog: %s, build: " RHHOOKS_VERSION ")", progname ?: "unknown");
+
+    // ── opendir/readdir hooks: hide jailbreak directory entries ─────────────────
+    MSHookFunction((void *)opendir, (void *)replaced_opendir, (void **)&orig_opendir);
+    RH_LOG("opendir hooked (MSHookFunction trampoline)");
+    MSHookFunction((void *)readdir, (void *)replaced_readdir, (void **)&orig_readdir);
+    RH_LOG("readdir hooked (MSHookFunction trampoline)");
 
     // ── RuntimeHookChecker bypass: install method_getImplementation hook first ──
     // Only needed for MBV Bank: _TtC9MBRaspSdk18RuntimeHookChecker (in MBRaspSdk)
