@@ -710,6 +710,28 @@ static int hook_getmntinfo(struct statfs **mntbufp, int flags) {
     return clean_count;
 }
 
+// ─── statfs() hook: clean filesystem flags for telemetry scanner ─────────────
+// sub_102A3814C (BIDV SmartBanking 0x102A3814C) calls statfs() at three points:
+//   reason=12: statfs("/") → f_mntonname[0] != '/' → detected (passes naturally)
+//   reason=66: statfs(XOR_path) → !(f_flags & MNT_RDONLY) → detected
+//   reason=78: statfs(XOR_path) → f_mntonname[0] != '/' → detected (passes naturally)
+// On Dopamine/RootHide jailbreak root may be mounted read-write (MNT_RDONLY
+// not set) → reason=66 fires. Fix: set MNT_RDONLY in returned f_flags.
+// callerIsJBDylib guard prevents breaking libroothide /.jbroot- path lookups.
+static int hook_statfs(const char *path, struct statfs *buf) {
+    int ret = (int)syscall(SYS_statfs64, path, buf);
+    if (gShouldHideJailbreak && ret == 0 && buf) {
+        Dl_info callerInfo;
+        bool callerIsJBDylib = (dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
+                                callerInfo.dli_fname != NULL &&
+                                strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
+        if (!callerIsJBDylib) {
+            buf->f_flags |= MNT_RDONLY;
+        }
+    }
+    return ret;
+}
+
 // ─── Fix B: dyld image-list hooks to hide jailbreak dylibs from MC1 ──────────
 //
 // MC1 (inside blueshield.framework) calls _dyld_image_count() and
@@ -1601,6 +1623,9 @@ void roothide_init_with_executable(const char* executable)
 
 		litehook_hook_function(getmntinfo, hook_getmntinfo);
 		RH_LOG("hook_getmntinfo installed");
+
+		litehook_hook_function(statfs, hook_statfs);
+		RH_LOG("hook_statfs installed");
 
 		// reason=0 cekL2Int: block fork() to clear the fork-success jailbreak bit.
 		litehook_hook_function(fork, hook_fork);

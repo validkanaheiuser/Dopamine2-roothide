@@ -1790,30 +1790,17 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 RH_LOG("SmartBanking: [SUCCESS] VNPAddionalBodyData isHook hooked -> @\"0\"");
             }
 
-            // ── Hook +[WrapperSecLib res] (BIDV BlueShield telemetry bypass) ──────────
-            // IDA-verified (8h0z): +[SecurityPackage res] (0x102474618) is a one-liner
-            // that calls +[WrapperSecLib res] (0x102a3c260), which calls sub_102A3814C
-            // (~85 KB telemetry scanner). Return hardcoded clean JSON directly —
-            // passing through to sub_102A3814C risks residual reason codes slipping
-            // through even with syscall hooks active.
-            {
-                Class wrpCls = objc_getClass("WrapperSecLib");
-                if (wrpCls) {
-                    Method m_res = class_getClassMethod(wrpCls, @selector(res));
-                    if (m_res) {
-                        method_setImplementation(m_res, imp_implementationWithBlock(
-                            ^NSString *(id _cls) {
-                                return @"{\"valid\":\"1\",\"reason\":\"0\",\"v1\":\"0\",\"v2\":\"0\",\"v3\":\"0\",\"v4\":\"0\",\"v5\":\"0\",\"sign\":\"0\",\"t\":\"0\",\"x\":\"0\"}";
-                            }
-                        ));
-                        RH_LOG("WrapperSecLib +res hooked -> clean JSON");
-                    } else {
-                        RH_LOG("WrapperSecLib +res: class method NOT FOUND");
-                    }
-                } else {
-                    RH_LOG("WrapperSecLib class NOT FOUND");
-                }
-            }
+            // ── +[WrapperSecLib res] — NOT hooked (pass-through) ─────────────────────
+            // IDA-verified (rflm): +[WrapperSecLib res] (0x102A3C260) calls
+            // sub_102A3814C (~85KB telemetry scanner) → sub_102A3C6E0 (SHA-256) →
+            // gettimeofday() to produce a real 64-char sign and millisecond t.
+            // bshield sub_2281D4 sends this JSON to the BIDV server via
+            // NSURLConnection; the server validates sign (SHA-256 HMAC) and t
+            // (replay window). Hardcoded sign:"0"/t:"0" fail both checks → C-2.
+            //
+            // Correct approach: let sub_102A3814C run naturally. All internal checks
+            // (access, statfs, getmntinfo, _dyld_image_count, getenv) are covered by
+            // hooks in roothider_main.c → reason=0, valid="1", real sign and t.
 
             // ── Hook VisaMobileFoundation SecurityDetector (pure Swift class) ─────────
             // IDA-verified (a8un): SecurityDetector is a pure Swift class with no ObjC
