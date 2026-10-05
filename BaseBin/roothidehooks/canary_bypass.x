@@ -873,6 +873,54 @@ static int8_t vmf_replaced_amIProxied(void *self)           { (void)self; return
 static int8_t vmf_replaced_amIRunInEmulator(void *self)     { (void)self; return 0; }
 static int8_t vmf_replaced_amIDebugged(void *self)          { (void)self; return 0; }
 
+// ─── vmf_image_added: hooks VMF SecurityDetector when the framework loads ─────
+//
+// IDA-verified (xbq7): MSHookFunctionChecker has 0 xrefs in VMF — it is dead
+// code from the IOSSecuritySuite source. MSHookFunction on VMF Swift symbols is
+// safe and undetected. The only prior failure was a timing issue: VMF loads at
+// ~11:16:06 while canaryBypassInit runs at 11:16:00, so dlsym returned NULL.
+//
+// _dyld_register_func_for_add_image fires for every image loaded (past and
+// future). When VMF is not yet loaded at registration time it fires later when
+// the framework appears in memory — before VMF's own initializers run, so the
+// hooks are in place before JailbreakChecker.performChecks() is called.
+// The static bool guard ensures hooks are applied exactly once even if the
+// callback fires for multiple VMF-matching paths.
+static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide) {
+    (void)vmaddr_slide;
+    static bool s_vmf_hooked = false;
+    if (s_vmf_hooked) return;
+
+    Dl_info info;
+    if (!dladdr((void *)mh, &info) || !info.dli_fname) return;
+    if (!strstr(info.dli_fname, "VisaMobileFoundation.framework/VisaMobileFoundation")) return;
+
+    s_vmf_hooked = true;
+
+    static const struct { const char *sym; void *repl; } kVMFHooks[] = {
+        { "$s20VisaMobileFoundation16SecurityDetectorC11isJailbreakSbyF",
+          (void *)vmf_replaced_isJailbreak },
+        { "$s20VisaMobileFoundation16SecurityDetectorC20amIReverseEngineeredSbyF",
+          (void *)vmf_replaced_amIReverseEngineered },
+        { "$s20VisaMobileFoundation16SecurityDetectorC10amIProxiedSbyF",
+          (void *)vmf_replaced_amIProxied },
+        { "$s20VisaMobileFoundation16SecurityDetectorC16amIRunInEmulatorSbyF",
+          (void *)vmf_replaced_amIRunInEmulator },
+        { "$s20VisaMobileFoundation16SecurityDetectorC11amIDebuggedSbyF",
+          (void *)vmf_replaced_amIDebugged },
+        { NULL, NULL }
+    };
+    for (int i = 0; kVMFHooks[i].sym; i++) {
+        void *sym = dlsym(RTLD_DEFAULT, kVMFHooks[i].sym);
+        if (sym) {
+            MSHookFunction(sym, kVMFHooks[i].repl, NULL);
+            RH_LOG("VMF %s hooked via add_image", kVMFHooks[i].sym);
+        } else {
+            RH_LOG("VMF %s: NOT FOUND after load", kVMFHooks[i].sym);
+        }
+    }
+}
+
 __attribute__((visibility("default"))) void logScanBypassInit(void)
 {
     const char *progname = getprogname();
@@ -1838,33 +1886,14 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             // (access, statfs, getmntinfo, _dyld_image_count, getenv) are covered by
             // hooks in roothider_main.c → reason=0, valid="1", real sign and t.
 
-            // ── Hook VisaMobileFoundation SecurityDetector (pure Swift class) ─────────
-            // IDA-verified (a8un): SecurityDetector is a pure Swift class with no ObjC
-            // bridge. Hook via dlsym on mangled Swift symbols + MSHookFunction.
-            {
-                static const struct { const char *sym; void *repl; } kVMFHooks[] = {
-                    { "$s20VisaMobileFoundation16SecurityDetectorC11isJailbreakSbyF",
-                      (void*)vmf_replaced_isJailbreak },
-                    { "$s20VisaMobileFoundation16SecurityDetectorC20amIReverseEngineeredSbyF",
-                      (void*)vmf_replaced_amIReverseEngineered },
-                    { "$s20VisaMobileFoundation16SecurityDetectorC10amIProxiedSbyF",
-                      (void*)vmf_replaced_amIProxied },
-                    { "$s20VisaMobileFoundation16SecurityDetectorC16amIRunInEmulatorSbyF",
-                      (void*)vmf_replaced_amIRunInEmulator },
-                    { "$s20VisaMobileFoundation16SecurityDetectorC11amIDebuggedSbyF",
-                      (void*)vmf_replaced_amIDebugged },
-                    { NULL, NULL }
-                };
-                for (int i = 0; kVMFHooks[i].sym; i++) {
-                    void *sym = dlsym(RTLD_DEFAULT, kVMFHooks[i].sym);
-                    if (sym) {
-                        MSHookFunction(sym, kVMFHooks[i].repl, NULL);
-                        RH_LOG("VisaMobileFoundation %s hooked", kVMFHooks[i].sym);
-                    } else {
-                        RH_LOG("VisaMobileFoundation %s: NOT FOUND", kVMFHooks[i].sym);
-                    }
-                }
-            }
+            // ── VisaMobileFoundation SecurityDetector — late-load hook ───────────────
+            // IDA-verified (xbq7): MSHookFunctionChecker has 0 xrefs → hooking safe.
+            // VMF loads dynamically at ~11:16:06, 6s after this constructor. dlsym at
+            // constructor time returns NULL (NOT FOUND). Register a dyld add-image
+            // callback instead: vmf_image_added() fires when VMF appears in memory
+            // (before VMF's own initializers) and MSHookFunction's the 5 symbols then.
+            _dyld_register_func_for_add_image(vmf_image_added);
+            RH_LOG("VMF SecurityDetector: _dyld_register_func_for_add_image registered");
         }
         // ── Hook +[MC1 isFrameworkAvailable] → NO ────────────────────────────────
         // IDA-verified (r82q): MC1.isFrameworkAvailable (0x20790) uses NSFileManager
