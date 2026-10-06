@@ -999,7 +999,7 @@ static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide)
         { NULL, NULL, 0, NULL }
     };
 
-    int hooked = 0;
+    __attribute__((unused)) int hooked = 0;
     for (int i = 0; kVMFHooks[i].repl; i++) {
         // Tier 1: LC_SYMTAB resolver — version-independent
         void *fn = find_symbol_in_image(mh, kVMFHooks[i].sym);
@@ -1013,7 +1013,8 @@ static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide)
         void *fallback = (void *)(base + kVMFHooks[i].fallback);
         uint32_t insn  = *(const uint32_t *)fallback;
         bool valid = (insn == 0xd503237fu) ||        // PACIBSP (arm64e prologue)
-                     ((insn >> 24) == 0xa9u);         // STP Xn,Xm,[SP,...] (common prologue)
+                     ((insn >> 24) == 0xa9u) ||       // STP Xn,Xm,[SP,...] (common prologue)
+                     ((insn >> 26) == 0x05u);         // B <offset> (unconditional branch)
         if (valid) {
             MSHookFunction(fallback, kVMFHooks[i].repl, NULL);
             RH_LOG("VMF SecurityDetector.%s hooked via fallback+0x%lx (insn=0x%08x)",
@@ -1024,6 +1025,7 @@ static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide)
                    kVMFHooks[i].name, insn, (unsigned long)kVMFHooks[i].fallback);
         }
     }
+    (void)hooked;
     RH_LOG("VMF SecurityDetector: %d/5 hooks installed", hooked);
 }
 
