@@ -17,6 +17,7 @@
 #include <mach/mach.h>
 #include <mach-o/loader.h>
 #include <mach-o/dyld.h>
+#include <mach-o/nlist.h>
 #include "tcbretail_got.h"
 
 // RHHIDE_DEBUG: define at compile time (-DRHHIDE_DEBUG) to enable OS-log diagnostics.
@@ -894,6 +895,57 @@ static bool hook_function_abs(void *target, void *replacement) {
 
 // (pass-through IMP removed — hook returns hardcoded clean JSON directly)
 
+// ─── LC_SYMTAB runtime resolver ───────────────────────────────────────────────
+// Resolves a symbol from the binary's LC_SYMTAB nlist_64 table. This finds
+// Swift internal-linkage functions that are NOT in the Export Trie (invisible
+// to dlsym). symbol_name must include the leading underscore (_$s...).
+//
+// Address formula: slide = base - text_vmaddr
+//   symtab_ptr  = slide + linkedit_vmaddr - linkedit_fileoff + symcmd->symoff
+//   strtab_ptr  = slide + linkedit_vmaddr - linkedit_fileoff + symcmd->stroff
+//   runtime_addr = n_value + slide
+static void *find_symbol_in_image(const struct mach_header *mh, const char *symbol_name) {
+    if (!mh || !symbol_name || mh->magic != MH_MAGIC_64) return NULL;
+
+    const struct load_command *lc = (const struct load_command *)
+        ((const uint8_t *)mh + sizeof(struct mach_header_64));
+    uintptr_t text_vmaddr = 0, linkedit_vmaddr = 0, linkedit_fileoff = 0;
+    const struct symtab_command *symcmd = NULL;
+
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        if (lc->cmdsize < sizeof(struct load_command)) break;
+        if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+            if (strncmp(seg->segname, "__TEXT", 6) == 0)
+                text_vmaddr = (uintptr_t)seg->vmaddr;
+            else if (strncmp(seg->segname, "__LINKEDIT", 10) == 0) {
+                linkedit_vmaddr = (uintptr_t)seg->vmaddr;
+                linkedit_fileoff = (uintptr_t)seg->fileoff;
+            }
+        } else if (lc->cmd == LC_SYMTAB) {
+            symcmd = (const struct symtab_command *)lc;
+        }
+        lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
+    }
+
+    if (!symcmd || !linkedit_fileoff) return NULL;
+
+    uintptr_t slide    = (uintptr_t)mh - text_vmaddr;
+    uintptr_t li_base  = slide + linkedit_vmaddr - linkedit_fileoff;
+    const struct nlist_64 *symtab = (const struct nlist_64 *)(li_base + symcmd->symoff);
+    const char           *strtab = (const char *)(li_base + symcmd->stroff);
+
+    for (uint32_t i = 0; i < symcmd->nsyms; i++) {
+        uint32_t strx = symtab[i].n_un.n_strx;
+        if (strx == 0) continue;
+        if (strcmp(strtab + strx, symbol_name) == 0) {
+            uintptr_t addr = (uintptr_t)symtab[i].n_value;
+            return addr ? (void *)(addr + slide) : NULL;
+        }
+    }
+    return NULL;
+}
+
 // ─── VisaMobileFoundation SecurityDetector replacement functions ──────────────
 // Swift Bool = int8_t (1-byte), 0=false. All return false (not jailbroken/hooked).
 static int8_t vmf_replaced_isJailbreak(void *self)          { (void)self; return 0; }
@@ -905,18 +957,17 @@ static int8_t vmf_replaced_amIDebugged(void *self)          { (void)self; return
 // ─── vmf_image_added: hooks VMF SecurityDetector when the framework loads ─────
 //
 // IDA-verified (xbq7): SecurityDetector's 5 Swift functions have internal
-// linkage — they are NOT in the Mach-O Export Trie. dlsym(RTLD_DEFAULT, sym)
-// always returns NULL regardless of load timing (confirmed PID 639 log: all 5
-// "NOT FOUND after load"). MSHookFunctionChecker has 0 xrefs in VMF (dead
-// code from IOSSecuritySuite source) so MSHookFunction is safe and undetected.
+// linkage — NOT in Export Trie, dlsym always returns NULL (confirmed PID 639).
+// MSHookFunctionChecker has 0 xrefs in VMF → MSHookFunction safe and undetected.
 //
-// Fix: use base + IDA-verified offset to locate each function directly.
-// Offsets verified against xbq7 (image base 0x0):
-//   isJailbreak          0x28578
-//   amIReverseEngineered 0x285b4
-//   amIProxied           0x285e4
-//   amIRunInEmulator     0x285e8
-//   amIDebugged          0x286b8
+// Strategy (3-tier):
+//   1. find_symbol_in_image: walk LC_SYMTAB nlist_64 at runtime — version-independent,
+//      works on any build as long as symbol names are unchanged.
+//   2. Hardcoded fallback offset (xbq7, base 0x0) with PACIBSP/STP prologue check:
+//      only applied when the first instruction at offset looks like a real function
+//      entry point. Skipped silently on binary layout change → no crash.
+//   3. NSFileManager.destinationOfSymbolicLinkAtPath:error: hook (separate, always
+//      active) prevents checkSymbolicLinks from triggering even if tier 1+2 both miss.
 static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide) {
     (void)vmaddr_slide;
     static bool s_vmf_hooked = false;
@@ -929,19 +980,51 @@ static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide)
     s_vmf_hooked = true;
     uintptr_t base = (uintptr_t)mh;
 
-    static const struct { uintptr_t offset; void *repl; const char *name; } kVMFHooks[] = {
-        { 0x28578, (void *)vmf_replaced_isJailbreak,          "isJailbreak"          },
-        { 0x285b4, (void *)vmf_replaced_amIReverseEngineered, "amIReverseEngineered"  },
-        { 0x285e4, (void *)vmf_replaced_amIProxied,           "amIProxied"           },
-        { 0x285e8, (void *)vmf_replaced_amIRunInEmulator,     "amIRunInEmulator"     },
-        { 0x286b8, (void *)vmf_replaced_amIDebugged,          "amIDebugged"          },
-        { 0,       NULL,                                       NULL                   }
+    static const struct {
+        const char *sym;        // LC_SYMTAB name (leading _ required)
+        void       *repl;
+        uintptr_t   fallback;   // IDA offset from image base 0x0 (xbq7)
+        const char *name;
+    } kVMFHooks[] = {
+        { "_$s20VisaMobileFoundation16SecurityDetectorC11isJailbreakSbyF",
+          (void *)vmf_replaced_isJailbreak,          0x28578, "isJailbreak"         },
+        { "_$s20VisaMobileFoundation16SecurityDetectorC20amIReverseEngineeredSbyF",
+          (void *)vmf_replaced_amIReverseEngineered, 0x285b4, "amIReverseEngineered" },
+        { "_$s20VisaMobileFoundation16SecurityDetectorC10amIProxiedSbyF",
+          (void *)vmf_replaced_amIProxied,           0x285e4, "amIProxied"          },
+        { "_$s20VisaMobileFoundation16SecurityDetectorC16amIRunInEmulatorSbyF",
+          (void *)vmf_replaced_amIRunInEmulator,     0x285e8, "amIRunInEmulator"    },
+        { "_$s20VisaMobileFoundation16SecurityDetectorC11amIDebuggedSbyF",
+          (void *)vmf_replaced_amIDebugged,          0x286b8, "amIDebugged"         },
+        { NULL, NULL, 0, NULL }
     };
+
+    int hooked = 0;
     for (int i = 0; kVMFHooks[i].repl; i++) {
-        MSHookFunction((void *)(base + kVMFHooks[i].offset), kVMFHooks[i].repl, NULL);
-        RH_LOG("VMF SecurityDetector.%s hooked at base+0x%lx", kVMFHooks[i].name, (unsigned long)kVMFHooks[i].offset);
+        // Tier 1: LC_SYMTAB resolver — version-independent
+        void *fn = find_symbol_in_image(mh, kVMFHooks[i].sym);
+        if (fn) {
+            MSHookFunction(fn, kVMFHooks[i].repl, NULL);
+            RH_LOG("VMF SecurityDetector.%s hooked via symtab at %p", kVMFHooks[i].name, fn);
+            hooked++;
+            continue;
+        }
+        // Tier 2: hardcoded fallback with prologue sanity check (crash-safe)
+        void *fallback = (void *)(base + kVMFHooks[i].fallback);
+        uint32_t insn  = *(const uint32_t *)fallback;
+        bool valid = (insn == 0xd503237fu) ||        // PACIBSP (arm64e prologue)
+                     ((insn >> 24) == 0xa9u);         // STP Xn,Xm,[SP,...] (common prologue)
+        if (valid) {
+            MSHookFunction(fallback, kVMFHooks[i].repl, NULL);
+            RH_LOG("VMF SecurityDetector.%s hooked via fallback+0x%lx (insn=0x%08x)",
+                   kVMFHooks[i].name, (unsigned long)kVMFHooks[i].fallback, insn);
+            hooked++;
+        } else {
+            RH_LOG("VMF SecurityDetector.%s: symtab MISS + bad prologue 0x%08x at +0x%lx — SKIP (tier 3 active)",
+                   kVMFHooks[i].name, insn, (unsigned long)kVMFHooks[i].fallback);
+        }
     }
-    RH_LOG("VMF SecurityDetector: all 5 direct-offset hooks installed");
+    RH_LOG("VMF SecurityDetector: %d/5 hooks installed", hooked);
 }
 
 // ─── opendir()/readdir() hooks via MSHookFunction (real trampolines) ─────────
