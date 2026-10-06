@@ -405,6 +405,34 @@ static NSArray *replaced_subpathsAtPath(id self, SEL sel, NSString *path) {
     return [filtered copy];
 }
 
+// IDA-verified (xbq7, 0xebc0): JailbreakChecker.checkSymbolicLinks calls
+// destinationOfSymbolicLinkAtPath:error: on 8 paths. On stock iOS 15,
+// /Applications, /usr/include, /usr/libexec, /usr/share, /Library/Ringtones,
+// and /Library/Wallpaper are valid system symlinks; the call returns non-nil
+// → VMF concludes jailbreak. This hook returns nil for those paths.
+static NSString *(*orig_destinationOfSymbolicLinkAtPath)(id self, SEL sel, NSString *path, NSError **error) = NULL;
+
+static NSString *replaced_destinationOfSymbolicLinkAtPath(id self, SEL sel, NSString *path, NSError **error) {
+    if (path) {
+        const char *cp = [path UTF8String];
+        if (cp &&
+            (strcmp(cp, "/Applications") == 0 ||
+             strcmp(cp, "/usr/include") == 0 ||
+             strcmp(cp, "/usr/libexec") == 0 ||
+             strcmp(cp, "/usr/share") == 0 ||
+             strcmp(cp, "/Library/Ringtones") == 0 ||
+             strcmp(cp, "/Library/Wallpaper") == 0 ||
+             jailbreakBypassShouldBlockPath(path))) {
+            RH_LOG("NSFileMgr.destinationOfSymbolicLinkAtPath BLOCKED: %s", cp);
+            if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                                    code:NSFileReadNoSuchFileError
+                                                userInfo:nil];
+            return nil;
+        }
+    }
+    return orig_destinationOfSymbolicLinkAtPath(self, sel, path, error);
+}
+
 // ─── ZDefend bypass for VP Bank NEO ──────────────────────────────────────────
 //
 // ZDefend.framework (Zimperium z9 RASP SDK) uses Direct Syscalls (SVC 0x80) for
@@ -876,17 +904,19 @@ static int8_t vmf_replaced_amIDebugged(void *self)          { (void)self; return
 
 // ─── vmf_image_added: hooks VMF SecurityDetector when the framework loads ─────
 //
-// IDA-verified (xbq7): MSHookFunctionChecker has 0 xrefs in VMF — it is dead
-// code from the IOSSecuritySuite source. MSHookFunction on VMF Swift symbols is
-// safe and undetected. The only prior failure was a timing issue: VMF loads at
-// ~11:16:06 while canaryBypassInit runs at 11:16:00, so dlsym returned NULL.
+// IDA-verified (xbq7): SecurityDetector's 5 Swift functions have internal
+// linkage — they are NOT in the Mach-O Export Trie. dlsym(RTLD_DEFAULT, sym)
+// always returns NULL regardless of load timing (confirmed PID 639 log: all 5
+// "NOT FOUND after load"). MSHookFunctionChecker has 0 xrefs in VMF (dead
+// code from IOSSecuritySuite source) so MSHookFunction is safe and undetected.
 //
-// _dyld_register_func_for_add_image fires for every image loaded (past and
-// future). When VMF is not yet loaded at registration time it fires later when
-// the framework appears in memory — before VMF's own initializers run, so the
-// hooks are in place before JailbreakChecker.performChecks() is called.
-// The static bool guard ensures hooks are applied exactly once even if the
-// callback fires for multiple VMF-matching paths.
+// Fix: use base + IDA-verified offset to locate each function directly.
+// Offsets verified against xbq7 (image base 0x0):
+//   isJailbreak          0x28578
+//   amIReverseEngineered 0x285b4
+//   amIProxied           0x285e4
+//   amIRunInEmulator     0x285e8
+//   amIDebugged          0x286b8
 static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide) {
     (void)vmaddr_slide;
     static bool s_vmf_hooked = false;
@@ -897,29 +927,21 @@ static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide)
     if (!strstr(info.dli_fname, "VisaMobileFoundation.framework/VisaMobileFoundation")) return;
 
     s_vmf_hooked = true;
+    uintptr_t base = (uintptr_t)mh;
 
-    static const struct { const char *sym; void *repl; } kVMFHooks[] = {
-        { "$s20VisaMobileFoundation16SecurityDetectorC11isJailbreakSbyF",
-          (void *)vmf_replaced_isJailbreak },
-        { "$s20VisaMobileFoundation16SecurityDetectorC20amIReverseEngineeredSbyF",
-          (void *)vmf_replaced_amIReverseEngineered },
-        { "$s20VisaMobileFoundation16SecurityDetectorC10amIProxiedSbyF",
-          (void *)vmf_replaced_amIProxied },
-        { "$s20VisaMobileFoundation16SecurityDetectorC16amIRunInEmulatorSbyF",
-          (void *)vmf_replaced_amIRunInEmulator },
-        { "$s20VisaMobileFoundation16SecurityDetectorC11amIDebuggedSbyF",
-          (void *)vmf_replaced_amIDebugged },
-        { NULL, NULL }
+    static const struct { uintptr_t offset; void *repl; const char *name; } kVMFHooks[] = {
+        { 0x28578, (void *)vmf_replaced_isJailbreak,          "isJailbreak"          },
+        { 0x285b4, (void *)vmf_replaced_amIReverseEngineered, "amIReverseEngineered"  },
+        { 0x285e4, (void *)vmf_replaced_amIProxied,           "amIProxied"           },
+        { 0x285e8, (void *)vmf_replaced_amIRunInEmulator,     "amIRunInEmulator"     },
+        { 0x286b8, (void *)vmf_replaced_amIDebugged,          "amIDebugged"          },
+        { 0,       NULL,                                       NULL                   }
     };
-    for (int i = 0; kVMFHooks[i].sym; i++) {
-        void *sym = dlsym(RTLD_DEFAULT, kVMFHooks[i].sym);
-        if (sym) {
-            MSHookFunction(sym, kVMFHooks[i].repl, NULL);
-            RH_LOG("VMF %s hooked via add_image", kVMFHooks[i].sym);
-        } else {
-            RH_LOG("VMF %s: NOT FOUND after load", kVMFHooks[i].sym);
-        }
+    for (int i = 0; kVMFHooks[i].repl; i++) {
+        MSHookFunction((void *)(base + kVMFHooks[i].offset), kVMFHooks[i].repl, NULL);
+        RH_LOG("VMF SecurityDetector.%s hooked at base+0x%lx", kVMFHooks[i].name, (unsigned long)kVMFHooks[i].offset);
     }
+    RH_LOG("VMF SecurityDetector: all 5 direct-offset hooks installed");
 }
 
 // ─── opendir()/readdir() hooks via MSHookFunction (real trampolines) ─────────
@@ -1124,6 +1146,16 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                             (IMP)replaced_subpathsAtPath,
                             (IMP *)&orig_subpathsAtPath);
             rh_record_method(m_sa, (IMP)orig_subpathsAtPath);
+        }
+        {
+            // IDA-verified (xbq7, 0xebc0): checkSymbolicLinks queries system paths
+            // that are valid symlinks on stock iOS 15; block them to prevent
+            // JailbreakChecker from flagging a clean device.
+            MSHookMessageEx([NSFileManager class],
+                            @selector(destinationOfSymbolicLinkAtPath:error:),
+                            (IMP)replaced_destinationOfSymbolicLinkAtPath,
+                            (IMP *)&orig_destinationOfSymbolicLinkAtPath);
+            RH_LOG("NSFileManager.destinationOfSymbolicLinkAtPath:error: hooked");
         }
         // ── Hook UIApplication canOpenURL: → NO for jailbreak tool schemes ───────
         // In SmartBanking (BIDV), do NOT hook UIApplication canOpenURL:!
