@@ -968,14 +968,38 @@ static int8_t vmf_replaced_amIDebugged(void *self)          { (void)self; return
 //      entry point. Skipped silently on binary layout change → no crash.
 //   3. NSFileManager.destinationOfSymbolicLinkAtPath:error: hook (separate, always
 //      active) prevents checkSymbolicLinks from triggering even if tier 1+2 both miss.
+//
+// NOTE: dladdr() cannot be used here. On iOS 15 with dyld4, _dyld_register_func_for_add_image
+// callbacks fire during notifyAddImage — BEFORE the image is inserted into the process's
+// global loadedImages table. dladdr((void *)mh, ...) therefore returns 0 every time,
+// causing vmf_image_added to silently return without installing any hooks.
+// Fix: inspect LC_ID_DYLIB directly from the Mach-O header, which is already mapped.
+static bool is_image_vmf(const struct mach_header *mh) {
+    if (!mh) return false;
+    if (mh->magic != MH_MAGIC_64 && mh->magic != MH_MAGIC) return false;
+    const uint8_t *cmd_ptr = (const uint8_t *)mh +
+        (mh->magic == MH_MAGIC_64 ? sizeof(struct mach_header_64) : sizeof(struct mach_header));
+    for (uint32_t i = 0; i < mh->ncmds; i++) {
+        const struct load_command *lc = (const struct load_command *)cmd_ptr;
+        if (lc->cmdsize < sizeof(struct load_command)) break;
+        if (lc->cmd == LC_ID_DYLIB) {
+            const struct dylib_command *dc = (const struct dylib_command *)lc;
+            if (dc->dylib.name.offset < lc->cmdsize) {
+                const char *name = (const char *)lc + dc->dylib.name.offset;
+                if (name && strstr(name, "VisaMobileFoundation") != NULL) return true;
+            }
+        }
+        cmd_ptr += lc->cmdsize;
+    }
+    return false;
+}
+
 static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide) {
     (void)vmaddr_slide;
     static bool s_vmf_hooked = false;
     if (s_vmf_hooked) return;
 
-    Dl_info info;
-    if (!dladdr((void *)mh, &info) || !info.dli_fname) return;
-    if (!strstr(info.dli_fname, "VisaMobileFoundation.framework/VisaMobileFoundation")) return;
+    if (!is_image_vmf(mh)) return;
 
     s_vmf_hooked = true;
     uintptr_t base = (uintptr_t)mh;
