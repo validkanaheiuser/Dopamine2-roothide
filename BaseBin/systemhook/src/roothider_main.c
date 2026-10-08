@@ -463,6 +463,8 @@ static const char *const kBlockedPathPatterns[] = {
     "/usr/share/zebra/",        // Zebra data directory (BSZInspection)
     "/Library/MobileSubstrate", // MobileSubstrate/ElleKit tweak inject path
     "/usr/lib/TweakInject",     // TweakInject path (alternate substrate path)
+    "/usr/sbin/cfprefsd",       // Sandbox escape indicator: sandboxed apps get EPERM on this path;
+                                // access() returning 0 signals sandbox escape to sub_102A3814C.
     "/bin/sh",
     "/bin/bash",
     "/etc/ssh",

@@ -1054,13 +1054,14 @@ static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide)
                    kVMFHooks[i].name, insn, (unsigned long)kVMFHooks[i].fallback);
         }
     }
-    // Tier 2b: Swift vtable dispatch thunk for isJailbreak (xbq7 offset 0x28270).
-    // Swift vtable dispatch can call the thunk instead of the method directly; patch
-    // it too so vtable-dispatch callers cannot bypass the direct function hook above.
-    hook_function_abs((void *)(base + 0x28270), (void *)vmf_replaced_isJailbreak);
-    RH_LOG("VMF SecurityDetector: vtable thunk isJailbreak+0x28270 hooked");
+    // NOTE: 0x28270 (g7sc/xbq7) is _HeaderInformationC12headerFieldsSDyS2SGvgTj —
+    // NOT the isJailbreak dispatch thunk (ICF collision). Do NOT hook 0x28270:
+    // vmf_replaced_isJailbreak returns int8_t 0, which is nil for a [String:String]
+    // dictionary, breaking all HTTP headers sent to the BIDV/Visa server.
+    // Patching the 5 function bodies above is sufficient: vtable dispatch ultimately
+    // calls the patched body and hits our replacement regardless.
     (void)hooked;
-    RH_LOG("VMF SecurityDetector: %d/5 + thunk hooks installed", hooked);
+    RH_LOG("VMF SecurityDetector: %d/5 hooks installed", hooked);
 }
 
 // ─── opendir()/readdir() hooks via MSHookFunction (real trampolines) ─────────
