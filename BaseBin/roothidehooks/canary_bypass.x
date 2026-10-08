@@ -1023,12 +1023,17 @@ static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide)
         { NULL, NULL, 0, NULL }
     };
 
+    // NOTE: MSHookFunction is NOT used here. On iOS 15 ARM64e, ElleKit cannot allocate
+    // new RWX pages inside an App Store sandbox without JIT entitlement (vm_protect RWX
+    // fails). MSHookFunction silently returns without writing any opcodes. hook_function_abs
+    // writes LDR X16,[PC+8]; BR X16; .quad into the EXISTING code page (already mapped —
+    // mprotect RWX on an existing page succeeds even without JIT entitlement).
     __attribute__((unused)) int hooked = 0;
     for (int i = 0; kVMFHooks[i].repl; i++) {
         // Tier 1: LC_SYMTAB resolver — version-independent
         void *fn = find_symbol_in_image(mh, kVMFHooks[i].sym);
         if (fn) {
-            MSHookFunction(fn, kVMFHooks[i].repl, NULL);
+            hook_function_abs(fn, kVMFHooks[i].repl);
             RH_LOG("VMF SecurityDetector.%s hooked via symtab at %p", kVMFHooks[i].name, fn);
             hooked++;
             continue;
@@ -1040,7 +1045,7 @@ static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide)
                      ((insn >> 24) == 0xa9u) ||       // STP Xn,Xm,[SP,...] (common prologue)
                      ((insn >> 26) == 0x05u);         // B <offset> (unconditional branch)
         if (valid) {
-            MSHookFunction(fallback, kVMFHooks[i].repl, NULL);
+            hook_function_abs(fallback, kVMFHooks[i].repl);
             RH_LOG("VMF SecurityDetector.%s hooked via fallback+0x%lx (insn=0x%08x)",
                    kVMFHooks[i].name, (unsigned long)kVMFHooks[i].fallback, insn);
             hooked++;
@@ -1049,8 +1054,13 @@ static void vmf_image_added(const struct mach_header *mh, intptr_t vmaddr_slide)
                    kVMFHooks[i].name, insn, (unsigned long)kVMFHooks[i].fallback);
         }
     }
+    // Tier 2b: Swift vtable dispatch thunk for isJailbreak (xbq7 offset 0x28270).
+    // Swift vtable dispatch can call the thunk instead of the method directly; patch
+    // it too so vtable-dispatch callers cannot bypass the direct function hook above.
+    hook_function_abs((void *)(base + 0x28270), (void *)vmf_replaced_isJailbreak);
+    RH_LOG("VMF SecurityDetector: vtable thunk isJailbreak+0x28270 hooked");
     (void)hooked;
-    RH_LOG("VMF SecurityDetector: %d/5 hooks installed", hooked);
+    RH_LOG("VMF SecurityDetector: %d/5 + thunk hooks installed", hooked);
 }
 
 // ─── opendir()/readdir() hooks via MSHookFunction (real trampolines) ─────────
