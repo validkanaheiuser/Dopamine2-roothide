@@ -648,6 +648,18 @@ static char *hook_getenv(const char *name) {
     return NULL;
 }
 
+// ─── getppid() hook: prevent reason=21 in BIDV sub_102A3814C ────────────────
+// BIDV SmartBanking 0x102A3814C (0x102a39adc): if (getppid()==1) reason=21.
+// Apps spawned by launchd on Dopamine have ppid=1 (verified via roothider_main
+// line 1196-1199 and IDA decompile). No trampoline needed — non-RASP processes
+// use __getppid() (direct SVC) to bypass this hook's non-call path.
+static pid_t hook_getppid(void) {
+    if (gShouldHideJailbreak) {
+        return 2; // any non-1 value passes the binary's ppid!=1 check
+    }
+    return __getppid();
+}
+
 // ─── getmntinfo() hook: filter rootless/jailbreak and snapshot mount points ──
 // SmartBanking 0x102A3814C (0x102a38218) inspects getmntinfo mount points:
 // 1. Checks if f_mntfromname of non-root mounts contains '@' (snapshot detection).
@@ -1634,6 +1646,9 @@ void roothide_init_with_executable(const char* executable)
 
 		litehook_hook_function(getenv, hook_getenv);
 		RH_LOG("hook_getenv installed");
+
+		litehook_hook_function(getppid, hook_getppid);
+		RH_LOG("hook_getppid installed");
 
 		litehook_hook_function(getmntinfo, hook_getmntinfo);
 		RH_LOG("hook_getmntinfo installed");

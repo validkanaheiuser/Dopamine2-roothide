@@ -2077,8 +2077,8 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             // (replay window). Hardcoded sign:"0"/t:"0" fail both checks → C-2.
             //
             // Correct approach: let sub_102A3814C run naturally. All internal checks
-            // (access, statfs, getmntinfo, _dyld_image_count, getenv) are covered by
-            // hooks in roothider_main.c → reason=0, valid="1", real sign and t.
+            // (access, statfs, getmntinfo, _dyld_image_count, getenv, getppid) are
+            // covered by hooks in roothider_main.c → reason=0, valid="1", real sign and t.
 
             // ── VisaMobileFoundation SecurityDetector — late-load hook ───────────────
             // IDA-verified (xbq7): MSHookFunctionChecker has 0 xrefs → hooking safe.
