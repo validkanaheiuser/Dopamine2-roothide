@@ -172,6 +172,16 @@ static IMP replaced_method_getImplementation(Method m) {
 
 static IMP (*orig_class_getMethodImplementation)(Class cls, SEL name) = NULL;
 
+// ─── sub_102A37D80 replacement: pretend direct fork fails ────────────────────
+// BIDV SmartBanking sub_1024645E8 (called from -[SOTP isDidChangeColor]) calls
+// sub_102A37D80 which does mac_syscall(SYS_fork) directly, bypassing hook_fork
+// (which only patches the libc `fork` symbol stub). On Dopamine, fork succeeds
+// (PID ≥ 0) → (PID & 0x80000000) == 0 → jailbreak detected by SOTP.
+// Returning -1: (-1 & 0x80000000) = 0x80000000 ≠ 0 → SOTP sees fork failure → clean.
+static pid_t replaced_direct_fork(void) {
+    return -1;
+}
+
 static IMP replaced_class_getMethodImplementation(Class cls, SEL name) {
     if (cls && name) {
         Method m = class_getInstanceMethod(cls, name);
@@ -1998,6 +2008,24 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     }));
                 }
                 RH_LOG("SmartBanking: [SUCCESS] SOTP isDidChangeColor, isDidChangeColor4, getDtR, checklibIsJB, cB, findOut hooked -> SAFE");
+            }
+
+            // ── Hook sub_102A37D80 (direct mac_syscall SYS_fork) ─────────────────────
+            // Verified via IDA: sub_1024645E8 (body of -[SOTP isDidChangeColor]) calls
+            // sub_102A37D80 at 0x102464ad8. sub_102A37D80 does mac_syscall(SYS_fork)
+            // directly — bypasses hook_fork which only patches the libc fork stub.
+            // On Dopamine, fork succeeds (PID ≥ 0) → (PID & 0x80000000) == 0 → C-2.
+            if (is_smartbanking) {
+                const struct mach_header *mh_main = _dyld_get_image_header(0);
+                if (mh_main) {
+                    uintptr_t main_slide = (uintptr_t)mh_main - 0x100000000ULL;
+                    void *fn_direct_fork = (void *)(0x102A37D80ULL + main_slide);
+                    if (hook_function_abs(fn_direct_fork, (void *)replaced_direct_fork)) {
+                        RH_LOG("SmartBanking: sub_102A37D80 (direct SYS_fork) hooked -> -1 (SAFE)");
+                    } else {
+                        RH_LOG("SmartBanking: sub_102A37D80 hook FAILED (mprotect err?)");
+                    }
+                }
             }
 
             Class vnbBioCls = objc_getClass("VNBBiometricManager");
