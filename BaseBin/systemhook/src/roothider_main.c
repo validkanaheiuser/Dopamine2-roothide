@@ -896,46 +896,33 @@ static int hook_fstatvfs(int fd, struct statvfs *buf) {
 // ─── getfsstat() hook: filter jailbreak mounts and APFS snapshots ─────────────
 // VisaMobileFoundation (FileChecker.getMountedVolumesViaGetfsstat) enumerates mounts
 // directly via getfsstat() to spot jailbreak artifacts and check root MNT_RDONLY.
+// Critical: getMountedVolumesViaGetfsstat calls getfsstat(NULL, 0, MNT_NOWAIT) to get
+// count, allocates [statfs](count), then calls getfsstat(buf, size, MNT_NOWAIT).
+// If count != resultCode, Swift throws assertionFailure and returns nil!
+// Both calls MUST return the exact same count and identical filtered mount table.
 static int hook_getfsstat(struct statfs *buf, int bufsize, int flags) {
     if (!gShouldHideJailbreak) {
         return (int)syscall(SYS_getfsstat64, buf, bufsize, flags);
     }
 
-    if (!buf || bufsize <= 0) {
-        // Caller queries count before allocating buffer (e.g. getMountedVolumesViaGetfsstat).
-        // Must return clean_count so count == resultCode check in Swift passes!
-        int max_count = (int)syscall(SYS_getfsstat64, NULL, 0, flags);
-        if (max_count <= 0) return max_count;
-        struct statfs *tmp = (struct statfs *)malloc(sizeof(struct statfs) * max_count);
-        if (!tmp) return max_count;
-        int real = (int)syscall(SYS_getfsstat64, tmp, sizeof(struct statfs) * max_count, flags);
-        int clean = 0;
-        for (int i = 0; i < real; i++) {
-            const char *on = tmp[i].f_mntonname;
-            const char *from = tmp[i].f_mntfromname;
-            if (strstr(on, "/var/jb") || strstr(on, "jbroot") || strstr(on, "basebin") ||
-                strstr(from, "/var/jb") || strstr(from, "jbroot") || strstr(from, "basebin") ||
-                strstr(on, "/private/preboot") || strstr(from, "/private/preboot")) continue;
-            if (strcmp(on, "/") != 0 && strchr(from, '@') != NULL) continue;
-            bool duplicate = false;
-            for (int j = 0; j < clean; j++) {
-                if (strcmp(from, tmp[j].f_mntfromname) == 0) { duplicate = true; break; }
-            }
-            if (duplicate) continue;
-            clean++;
-        }
+    int max_count = (int)syscall(SYS_getfsstat64, NULL, 0, flags);
+    if (max_count <= 0) return max_count;
+
+    struct statfs *tmp = (struct statfs *)malloc(sizeof(struct statfs) * max_count);
+    if (!tmp) return (int)syscall(SYS_getfsstat64, buf, bufsize, flags);
+
+    int real = (int)syscall(SYS_getfsstat64, tmp, sizeof(struct statfs) * max_count, flags);
+    if (real <= 0) {
         free(tmp);
-        RH_LOG("getfsstat(NULL) predicted %d clean mounts (raw %d)", clean, max_count);
-        return clean;
+        return real;
     }
 
-    int real_count = (int)syscall(SYS_getfsstat64, buf, bufsize, flags);
-    if (real_count <= 0) return real_count;
-
     int clean_count = 0;
-    for (int i = 0; i < real_count; i++) {
-        const char *on = buf[i].f_mntonname;
-        const char *from = buf[i].f_mntfromname;
+    int max_dest = (buf && bufsize > 0) ? (int)(bufsize / sizeof(struct statfs)) : 0;
+
+    for (int i = 0; i < real; i++) {
+        const char *on = tmp[i].f_mntonname;
+        const char *from = tmp[i].f_mntfromname;
 
         // Filter out jailbreak mounts
         if (strstr(on, "/var/jb") || strstr(on, "jbroot") || strstr(on, "basebin") ||
@@ -952,7 +939,7 @@ static int hook_getfsstat(struct statfs *buf, int bufsize, int flags) {
         // Filter out duplicate from-name mounts (bind mount detection)
         bool duplicate = false;
         for (int j = 0; j < clean_count; j++) {
-            if (strcmp(from, buf[j].f_mntfromname) == 0) {
+            if (strcmp(from, tmp[j].f_mntfromname) == 0) {
                 duplicate = true;
                 break;
             }
@@ -961,16 +948,28 @@ static int hook_getfsstat(struct statfs *buf, int bufsize, int flags) {
 
         // Ensure root mount has MNT_RDONLY and MNT_ROOTFS
         if (strcmp(on, "/") == 0) {
-            buf[i].f_flags |= (MNT_RDONLY | MNT_ROOTFS);
+            tmp[i].f_flags |= (MNT_RDONLY | MNT_ROOTFS);
         }
 
-        if (clean_count != i) {
-            buf[clean_count] = buf[i];
+        // Compact accepted entries in tmp so duplicate check works across all mounts
+        tmp[clean_count] = tmp[i];
+
+        if (buf && clean_count < max_dest) {
+            buf[clean_count] = tmp[clean_count];
         }
         clean_count++;
     }
-    RH_LOG("getfsstat filtered %d -> %d mounts", real_count, clean_count);
-    return clean_count;
+
+    free(tmp);
+
+    if (!buf || bufsize <= 0) {
+        RH_LOG("getfsstat(NULL) predicted %d clean mounts (raw %d)", clean_count, max_count);
+        return clean_count;
+    }
+
+    int returned = (clean_count < max_dest) ? clean_count : max_dest;
+    RH_LOG("getfsstat(buf) returned %d clean mounts (raw %d, clean %d, max_dest %d)", returned, max_count, clean_count, max_dest);
+    return returned;
 }
 
 // ─── Fix B: dyld image-list hooks to hide jailbreak dylibs from MC1 ──────────

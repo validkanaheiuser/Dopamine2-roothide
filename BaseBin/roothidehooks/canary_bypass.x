@@ -511,10 +511,14 @@ static void replaced_UIWindow_makeKeyAndVisible(id self, SEL sel) {
             rootVC = [self valueForKey:@"rootViewController"];
         }
         (void)rootVC;
-        RH_LOG("UIWindow makeKeyAndVisible: window=%p rootVC=%s callstack:\n%s",
+        NSArray *syms = [NSThread callStackSymbols];
+        RH_LOG("UIWindow makeKeyAndVisible: window=%p rootVC=%s (frames=%lu)",
                self,
                rootVC ? class_getName([rootVC class]) : "(nil)",
-               [[[NSThread callStackSymbols] componentsJoinedByString:@"\n"] UTF8String]);
+               (unsigned long)[syms count]);
+        for (NSString *s in syms) {
+            RH_LOG("  callstack: %s", [s UTF8String]);
+        }
     }
 }
 #endif
