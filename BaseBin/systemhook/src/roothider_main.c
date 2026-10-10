@@ -583,6 +583,7 @@ static pid_t hook_fork(void) {
             return pid;
         }
         errno = EPERM;
+        RH_LOG("fork() BLOCKED -> returning -1 (EPERM)");
         return -1;
     }
     return (pid_t)syscall(SYS_fork);
@@ -655,9 +656,27 @@ static char *hook_getenv(const char *name) {
 // use __getppid() (direct SVC) to bypass this hook's non-call path.
 static pid_t hook_getppid(void) {
     if (gShouldHideJailbreak) {
+        RH_LOG("getppid() intercepted -> returning 2 (spoofed)");
         return 2; // any non-1 value passes the binary's ppid!=1 check
     }
     return __getppid();
+}
+
+// ─── lstat() hook: prevent S_IFLNK detection in SmartBanking sub_1024645E8 ──
+// BIDV SmartBanking sub_1024645E8 calls lstat on /Applications and /var/stash
+// paths, testing (st_mode & 0xA000) != 0 (S_IFLNK symlink).
+static int hook_lstat(const char *path, struct stat *buf) {
+    int ret = (int)syscall(SYS_lstat64, path, buf);
+    if (gShouldHideJailbreak && ret == 0 && buf && path) {
+        if (strcmp(path, "/Applications") == 0 || strstr(path, "/var/stash") != NULL) {
+            RH_LOG("lstat CALLED on: %s (mode=0x%x)", path, buf->st_mode);
+            if ((buf->st_mode & 0xF000) == 0xA000) { // S_IFLNK
+                buf->st_mode = (buf->st_mode & ~0xF000) | 0x4000; // S_IFDIR
+                RH_LOG("lstat SPOOFED S_IFLNK -> S_IFDIR for: %s", path);
+            }
+        }
+    }
+    return ret;
 }
 
 // ─── getmntinfo() hook: filter rootless/jailbreak and snapshot mount points ──
@@ -1655,6 +1674,9 @@ void roothide_init_with_executable(const char* executable)
 
 		litehook_hook_function(statfs, hook_statfs);
 		RH_LOG("hook_statfs installed");
+
+		litehook_hook_function(lstat, hook_lstat);
+		RH_LOG("hook_lstat installed");
 
 		// reason=0 cekL2Int: block fork() to clear the fork-success jailbreak bit.
 		litehook_hook_function(fork, hook_fork);

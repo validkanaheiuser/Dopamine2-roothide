@@ -179,6 +179,7 @@ static IMP (*orig_class_getMethodImplementation)(Class cls, SEL name) = NULL;
 // (PID ≥ 0) → (PID & 0x80000000) == 0 → jailbreak detected by SOTP.
 // Returning -1: (-1 & 0x80000000) = 0x80000000 ≠ 0 → SOTP sees fork failure → clean.
 static pid_t replaced_direct_fork(void) {
+    RH_LOG("SmartBanking: [HIT] sub_102A37D80 (direct SYS_fork) intercepted -> returning -1");
     return -1;
 }
 
@@ -258,6 +259,13 @@ static const char *const kJailbreakPathPatterns[] = {
     "/etc/ssh/",                   // SSH config directory
     "/private/jailbreak.txt",      // Jailbreak test file
     "/private/jb_test.txt",        // Jailbreak test file
+    "/private/avl.txt",            // SOTP AVL test file
+    "/var/stash",                  // Stash directory
+    "Dopamine",                    // Dopamine keyword
+    "Sileo",                       // Sileo keyword
+    "TrollStore",                  // TrollStore keyword
+    "Zebra",                       // Zebra keyword
+    "Installer5",                  // Installer5 keyword
     NULL
 };
 
@@ -369,18 +377,20 @@ static NSArray *(*orig_contentsOfDirectoryAtPath)(id self, SEL sel, NSString *pa
 
 static NSArray *replaced_contentsOfDirectoryAtPath(id self, SEL sel, NSString *path, NSError **err) {
     NSArray *result = orig_contentsOfDirectoryAtPath(self, sel, path, err);
-    RH_LOG("NSFileMgr.contentsOfDirectoryAtPath: %s count=%d", [path UTF8String] ?: "", (int)[result count]);
-    if (!result || [result count] == 0) return result;
+    if (!result || [result count] == 0) {
+        RH_LOG("NSFileMgr.contentsOfDirectoryAtPath: %s (empty/nil)", [path UTF8String] ?: "");
+        return result;
+    }
     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:[result count]];
     for (NSString *entry in result) {
-        // entry is a RELATIVE name (e.g. "jb"); construct the full path before
-        // checking so strstr("/var/jb", "/var/jb") matches instead of
-        // strstr("jb", "/var/jb/") == NULL (the old bug that let "jb" through).
         NSString *fullPath = [path stringByAppendingPathComponent:entry];
-        if (!jailbreakBypassShouldBlockPath(fullPath)) {
+        if (!jailbreakBypassShouldBlockPath(fullPath) && !jailbreakBypassShouldBlockPath(entry)) {
             [filtered addObject:entry];
+        } else {
+            RH_LOG("NSFileMgr.contentsOfDirectoryAtPath FILTERED: %s/%s", [path UTF8String] ?: "", [entry UTF8String] ?: "");
         }
     }
+    RH_LOG("NSFileMgr.contentsOfDirectoryAtPath: %s (orig=%d, clean=%d)", [path UTF8String] ?: "", (int)[result count], (int)[filtered count]);
     return [filtered copy];
 }
 
@@ -388,15 +398,20 @@ static NSArray *(*orig_subpathsOfDirectoryAtPath)(id self, SEL sel, NSString *pa
 
 static NSArray *replaced_subpathsOfDirectoryAtPath(id self, SEL sel, NSString *path, NSError **err) {
     NSArray *result = orig_subpathsOfDirectoryAtPath(self, sel, path, err);
-    RH_LOG("NSFileMgr.subpathsOfDirectoryAtPath: %s count=%d", [path UTF8String] ?: "", (int)[result count]);
-    if (!result || [result count] == 0) return result;
+    if (!result || [result count] == 0) {
+        RH_LOG("NSFileMgr.subpathsOfDirectoryAtPath: %s (empty/nil)", [path UTF8String] ?: "");
+        return result;
+    }
     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:[result count]];
     for (NSString *entry in result) {
         NSString *fullPath = [path stringByAppendingPathComponent:entry];
-        if (!jailbreakBypassShouldBlockPath(fullPath)) {
+        if (!jailbreakBypassShouldBlockPath(fullPath) && !jailbreakBypassShouldBlockPath(entry)) {
             [filtered addObject:entry];
+        } else {
+            RH_LOG("NSFileMgr.subpathsOfDirectoryAtPath FILTERED: %s/%s", [path UTF8String] ?: "", [entry UTF8String] ?: "");
         }
     }
+    RH_LOG("NSFileMgr.subpathsOfDirectoryAtPath: %s (orig=%d, clean=%d)", [path UTF8String] ?: "", (int)[result count], (int)[filtered count]);
     return [filtered copy];
 }
 
@@ -404,15 +419,20 @@ static NSArray *(*orig_subpathsAtPath)(id self, SEL sel, NSString *path) = NULL;
 
 static NSArray *replaced_subpathsAtPath(id self, SEL sel, NSString *path) {
     NSArray *result = orig_subpathsAtPath(self, sel, path);
-    RH_LOG("NSFileMgr.subpathsAtPath: %s count=%d", [path UTF8String] ?: "", (int)[result count]);
-    if (!result || [result count] == 0) return result;
+    if (!result || [result count] == 0) {
+        RH_LOG("NSFileMgr.subpathsAtPath: %s (empty/nil)", [path UTF8String] ?: "");
+        return result;
+    }
     NSMutableArray *filtered = [NSMutableArray arrayWithCapacity:[result count]];
     for (NSString *entry in result) {
         NSString *fullPath = [path stringByAppendingPathComponent:entry];
-        if (!jailbreakBypassShouldBlockPath(fullPath)) {
+        if (!jailbreakBypassShouldBlockPath(fullPath) && !jailbreakBypassShouldBlockPath(entry)) {
             [filtered addObject:entry];
+        } else {
+            RH_LOG("NSFileMgr.subpathsAtPath FILTERED: %s/%s", [path UTF8String] ?: "", [entry UTF8String] ?: "");
         }
     }
+    RH_LOG("NSFileMgr.subpathsAtPath: %s (orig=%d, clean=%d)", [path UTF8String] ?: "", (int)[result count], (int)[filtered count]);
     return [filtered copy];
 }
 
@@ -1859,6 +1879,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 Method m_cjb = class_getInstanceMethod(checkJBMeta, @selector(checkJB));
                 if (m_cjb) {
                     method_setImplementation(m_cjb, imp_implementationWithBlock(^BOOL(id _cls) {
+                        RH_LOG("SmartBanking: [HIT] CheckJB.checkJB intercepted -> returning NO");
                         return NO;
                     }));
                     RH_LOG("SmartBanking: [SUCCESS] CheckJB.checkJB hooked -> NO");
@@ -1870,6 +1891,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 Method m_dtt = class_getInstanceMethod(dttJbMeta, @selector(isJailbroken));
                 if (m_dtt) {
                     method_setImplementation(m_dtt, imp_implementationWithBlock(^BOOL(id _cls) {
+                        RH_LOG("SmartBanking: [HIT] DTTJailbreakDetection.isJailbroken intercepted -> returning NO");
                         return NO;
                     }));
                     RH_LOG("SmartBanking: [SUCCESS] DTTJailbreakDetection.isJailbroken hooked -> NO");
@@ -1881,6 +1903,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 Method m_vnp = class_getInstanceMethod(vnpAcMeta, @selector(checkJailbreak));
                 if (m_vnp) {
                     method_setImplementation(m_vnp, imp_implementationWithBlock(^BOOL(id _cls) {
+                        RH_LOG("SmartBanking: [HIT] VNPACUtility.checkJailbreak intercepted -> returning NO");
                         return NO;
                     }));
                     RH_LOG("SmartBanking: [SUCCESS] VNPACUtility.checkJailbreak hooked -> NO");
@@ -1892,12 +1915,14 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 Method m_jb1 = class_getInstanceMethod(uiDevCls, @selector(isJailBreak));
                 if (m_jb1) {
                     method_setImplementation(m_jb1, imp_implementationWithBlock(^BOOL(id _self) {
+                        RH_LOG("SmartBanking: [HIT] UIDevice isJailBreak intercepted -> returning NO");
                         return NO;
                     }));
                 }
                 Method m_jb2 = class_getInstanceMethod(uiDevCls, @selector(isJailBroken));
                 if (m_jb2) {
                     method_setImplementation(m_jb2, imp_implementationWithBlock(^BOOL(id _self) {
+                        RH_LOG("SmartBanking: [HIT] UIDevice isJailBroken intercepted -> returning NO");
                         return NO;
                     }));
                 }
@@ -1909,25 +1934,28 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 Method m_gijb = class_getInstanceMethod(secPkgCls, @selector(GET_IS_JAILBREAK));
                 if (m_gijb) {
                     method_setImplementation(m_gijb, imp_implementationWithBlock(^NSString *(id _self) {
+                        RH_LOG("SmartBanking: [HIT] SecurityPackage GET_IS_JAILBREAK intercepted -> returning NOT_JAILBREAK");
                         return @"NOT_JAILBREAK";
                     }));
                 }
                 Method m_isChg = class_getInstanceMethod(secPkgCls, @selector(isDidChangeColor));
                 if (m_isChg) {
                     method_setImplementation(m_isChg, imp_implementationWithBlock(^BOOL(id _self) {
+                        RH_LOG("SmartBanking: [HIT] SecurityPackage isDidChangeColor intercepted -> returning NO");
                         return NO;
                     }));
                 }
                 Method m_gcc = class_getInstanceMethod(secPkgCls, @selector(getColorCode));
                 if (m_gcc) {
                     method_setImplementation(m_gcc, imp_implementationWithBlock(^NSString *(id _self) {
+                        RH_LOG("SmartBanking: [HIT] SecurityPackage getColorCode intercepted -> returning t54r90");
                         return @"t54r90";
                     }));
                 }
                 Method m_secCheckLib = class_getInstanceMethod(secPkgCls, @selector(checklib));
                 if (m_secCheckLib) {
                     method_setImplementation(m_secCheckLib, imp_implementationWithBlock(^(id _self) {
-                        // no-op (prevents logging Exit1/Exit2/Exit3 analytics)
+                        RH_LOG("SmartBanking: [HIT] SecurityPackage checklib intercepted -> NO-OP");
                     }));
                 }
                 Method m_gmc = class_getInstanceMethod(secPkgCls, @selector(getMainCodeWithTs:phoneNo:));
@@ -1944,7 +1972,9 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                             int ts_val = [[ts substringWithRange:tsRange] intValue];
                             results[i] = v76_digit + phone_val + ts_val;
                         }
-                        return [NSString stringWithFormat:@"%02x%02x%02x", results[0], results[1], results[2]];
+                        NSString *resStr = [NSString stringWithFormat:@"%02x%02x%02x", results[0], results[1], results[2]];
+                        RH_LOG("SmartBanking: [HIT] SecurityPackage getMainCodeWithTs:%s phoneNo:%s -> %s", [ts UTF8String] ?: "", [phoneNo UTF8String] ?: "", [resStr UTF8String] ?: "");
+                        return resStr;
                     }));
                     RH_LOG("SmartBanking: [SUCCESS] SecurityPackage getMainCodeWithTs:phoneNo: hooked -> 892 formula");
                 }
@@ -1974,37 +2004,42 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 Method m_sotpChg = class_getInstanceMethod(sotpCls, @selector(isDidChangeColor));
                 if (m_sotpChg) {
                     method_setImplementation(m_sotpChg, imp_implementationWithBlock(^BOOL(id _self) {
+                        RH_LOG("SmartBanking: [HIT] SOTP isDidChangeColor intercepted -> returning NO");
                         return NO;
                     }));
                 }
                 Method m_sotpChg4 = class_getInstanceMethod(sotpCls, @selector(isDidChangeColor4));
                 if (m_sotpChg4) {
                     method_setImplementation(m_sotpChg4, imp_implementationWithBlock(^BOOL(id _self) {
+                        RH_LOG("SmartBanking: [HIT] SOTP isDidChangeColor4 intercepted -> returning NO");
                         return NO;
                     }));
                 }
                 Method m_sotpDtr = class_getInstanceMethod(sotpCls, @selector(getDtR));
                 if (m_sotpDtr) {
                     method_setImplementation(m_sotpDtr, imp_implementationWithBlock(^NSString *(id _self) {
+                        RH_LOG("SmartBanking: [HIT] SOTP getDtR intercepted -> returning 0");
                         return @"0";
                     }));
                 }
                 Method m_sotpChkLib = class_getInstanceMethod(sotpCls, @selector(checklibIsJB));
                 if (m_sotpChkLib) {
                     method_setImplementation(m_sotpChkLib, imp_implementationWithBlock(^BOOL(id _self) {
+                        RH_LOG("SmartBanking: [HIT] SOTP checklibIsJB intercepted -> returning NO");
                         return NO;
                     }));
                 }
                 Method m_sotpCb = class_getInstanceMethod(sotpCls, @selector(cB));
                 if (m_sotpCb) {
                     method_setImplementation(m_sotpCb, imp_implementationWithBlock(^BOOL(id _self) {
+                        RH_LOG("SmartBanking: [HIT] SOTP cB intercepted -> returning NO");
                         return NO;
                     }));
                 }
                 Method m_sotpFindOut = class_getInstanceMethod(sotpCls, @selector(findOut:));
                 if (m_sotpFindOut) {
                     method_setImplementation(m_sotpFindOut, imp_implementationWithBlock(^(id _self, id path) {
-                        // no-op (prevents recursive scanning of /private/var/)
+                        RH_LOG("SmartBanking: [HIT] SOTP findOut:%s intercepted -> NO-OP", [path respondsToSelector:@selector(UTF8String)] ? [path UTF8String] : "");
                     }));
                 }
                 RH_LOG("SmartBanking: [SUCCESS] SOTP isDidChangeColor, isDidChangeColor4, getDtR, checklibIsJB, cB, findOut hooked -> SAFE");
@@ -2049,6 +2084,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 Method m_trkHook = class_getInstanceMethod(vnpTrackerCls, @selector(isHook));
                 if (m_trkHook) {
                     method_setImplementation(m_trkHook, imp_implementationWithBlock(^NSString *(id _self) {
+                        RH_LOG("SmartBanking: [HIT] VNPAnalyticsTracker isHook intercepted -> returning @\"0\"");
                         return @"0";
                     }));
                 }
@@ -2060,6 +2096,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 Method m_bodyHook = class_getInstanceMethod(vnpBodyCls, @selector(isHook));
                 if (m_bodyHook) {
                     method_setImplementation(m_bodyHook, imp_implementationWithBlock(^NSString *(id _self) {
+                        RH_LOG("SmartBanking: [HIT] VNPAddionalBodyData isHook intercepted -> returning @\"0\"");
                         return @"0";
                     }));
                 }
@@ -2082,6 +2119,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     Method m_dmb = class_getClassMethod(kmbCls, @selector(d_mb));
                     if (m_dmb) {
                         method_setImplementation(m_dmb, imp_implementationWithBlock(^int(id _cls) {
+                            RH_LOG("SmartBanking: [HIT] KMB d_mb intercepted -> returning 5 (CLEAN)");
                             return 5; // CLEAN
                         }));
                         RH_LOG("SmartBanking: [SUCCESS] KMB d_mb hooked -> 5 (CLEAN)");
@@ -2096,17 +2134,32 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 RH_LOG("SmartBanking: NSUserDefaults /var/jb key cleared");
             }
 
-            // ── +[WrapperSecLib res] — NOT hooked (pass-through) ─────────────────────
+            // ── +[WrapperSecLib res] — pass-through telemetry logger ─────────────────
             // IDA-verified (rflm): +[WrapperSecLib res] (0x102A3C260) calls
             // sub_102A3814C (~85KB telemetry scanner) → sub_102A3C6E0 (SHA-256) →
             // gettimeofday() to produce a real 64-char sign and millisecond t.
-            // bshield sub_2281D4 sends this JSON to the BIDV server via
-            // NSURLConnection; the server validates sign (SHA-256 HMAC) and t
-            // (replay window). Hardcoded sign:"0"/t:"0" fail both checks → C-2.
-            //
-            // Correct approach: let sub_102A3814C run naturally. All internal checks
-            // (access, statfs, getmntinfo, _dyld_image_count, getenv, getppid) are
-            // covered by hooks in roothider_main.c → reason=0, valid="1", real sign and t.
+            // bshield sub_2281D4 sends this JSON to the BIDV server via NSURLConnection.
+            // We install a PASS-THROUGH hook that runs original res and logs the exact JSON returned!
+            {
+                Class wrapperSecCls = objc_getClass("WrapperSecLib");
+                if (wrapperSecCls) {
+                    Method m_res = class_getClassMethod(wrapperSecCls, @selector(res));
+                    if (m_res) {
+                        static id (*orig_wsl_res)(id, SEL) = NULL;
+                        orig_wsl_res = (id (*)(id, SEL))method_getImplementation(m_res);
+                        method_setImplementation(m_res, imp_implementationWithBlock(^id(id _self) {
+                            id ret = orig_wsl_res ? orig_wsl_res(_self, @selector(res)) : nil;
+                            RH_LOG("SmartBanking: [RESULT] +[WrapperSecLib res] returned: %s", [ret respondsToSelector:@selector(UTF8String)] ? [ret UTF8String] : "(non-string)");
+                            return ret;
+                        }));
+                        RH_LOG("SmartBanking: [SUCCESS] +[WrapperSecLib res] pass-through telemetry logger hooked");
+                    } else {
+                        RH_LOG("SmartBanking: +[WrapperSecLib res] method NOT FOUND");
+                    }
+                } else {
+                    RH_LOG("SmartBanking: WrapperSecLib class NOT FOUND");
+                }
+            }
 
             // ── VisaMobileFoundation SecurityDetector — late-load hook ───────────────
             // IDA-verified (xbq7): MSHookFunctionChecker has 0 xrefs → hooking safe.
