@@ -505,7 +505,10 @@ static void replaced_UIWindow_makeKeyAndVisible(id self, SEL sel) {
         orig_UIWindow_makeKeyAndVisible(self, sel);
     }
     @autoreleasepool {
-        UIViewController *rootVC = [(UIWindow *)self rootViewController];
+        id rootVC = nil;
+        if ([self respondsToSelector:@selector(rootViewController)]) {
+            rootVC = [self valueForKey:@"rootViewController"];
+        }
         RH_LOG("UIWindow makeKeyAndVisible: window=%p rootVC=%s callstack:\n%s",
                self,
                rootVC ? class_getName([rootVC class]) : "(nil)",
@@ -1379,13 +1382,16 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
             }
 
             // Diagnostic UIWindow presentation logger:
-            Method m_mkav = class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible));
-            if (m_mkav) {
-                MSHookMessageEx([UIWindow class],
-                                @selector(makeKeyAndVisible),
-                                (IMP)replaced_UIWindow_makeKeyAndVisible,
-                                (IMP *)&orig_UIWindow_makeKeyAndVisible);
-                RH_LOG("UIWindow.makeKeyAndVisible diagnostic hooked");
+            Class uiWinCls = objc_getClass("UIWindow");
+            if (uiWinCls) {
+                Method m_mkav = class_getInstanceMethod(uiWinCls, @selector(makeKeyAndVisible));
+                if (m_mkav) {
+                    MSHookMessageEx(uiWinCls,
+                                    @selector(makeKeyAndVisible),
+                                    (IMP)replaced_UIWindow_makeKeyAndVisible,
+                                    (IMP *)&orig_UIWindow_makeKeyAndVisible);
+                    RH_LOG("UIWindow.makeKeyAndVisible diagnostic hooked");
+                }
             }
         }
         // ── Hook UIApplication canOpenURL: → NO for jailbreak tool schemes ───────
