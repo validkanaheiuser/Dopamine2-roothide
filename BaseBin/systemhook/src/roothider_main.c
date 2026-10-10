@@ -9,6 +9,7 @@
 #include <sys/mount.h>
 #include <sys/syscall.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
 #include <mach-o/dyld_images.h>
 #include <mach-o/loader.h>
 #include <mach/task.h>
@@ -50,7 +51,15 @@ static inline void rh_log(const char *fmt, ...) {
 #define SYS_stat64      338
 #define SYS_lstat64     340
 #define SYS_statfs64    345
+#define SYS_fstatfs64   346
 #define SYS_getfsstat64 347
+#endif
+
+#ifndef ST_RDONLY
+#define ST_RDONLY       1
+#endif
+#ifndef ST_NOSUID
+#define ST_NOSUID       2
 #endif
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -524,8 +533,13 @@ static int hook_access(const char *path, int mode) {
             // Substring-match block (BSZInspection, cekL3Int — broader jailbreak paths).
             for (int i = 0; kBlockedPathPatterns[i]; i++) {
                 if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
-                    RH_LOG("access BLOCKED(pattern=%s): %s", kBlockedPathPatterns[i], path);
-                    errno = ENOENT;
+                    if (strstr(path, "cfprefsd") != NULL) {
+                        RH_LOG("access BLOCKED(sandbox-emul EPERM): %s", path);
+                        errno = EPERM;
+                    } else {
+                        RH_LOG("access BLOCKED(pattern=%s): %s", kBlockedPathPatterns[i], path);
+                        errno = ENOENT;
+                    }
                     return -1;
                 }
             }
@@ -775,6 +789,150 @@ static int hook_statfs(const char *path, struct statfs *buf) {
         }
     }
     return ret;
+}
+
+static int hook_fstatfs(int fd, struct statfs *buf) {
+    int ret = (int)syscall(SYS_fstatfs64, fd, buf);
+    if (gShouldHideJailbreak && ret == 0 && buf) {
+        Dl_info callerInfo;
+        bool callerIsJBDylib = (dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
+                                callerInfo.dli_fname != NULL &&
+                                strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
+        if (!callerIsJBDylib) {
+            buf->f_flags |= MNT_RDONLY;
+        }
+    }
+    return ret;
+}
+
+// ─── statvfs() & fstatvfs() hooks: ensure ST_RDONLY for POSIX checkers ───────
+// VisaMobileFoundation (0x296B4 FileChecker.checkRestrictedPathIsReadonlyViaStatvfs)
+// calls statvfs("/", &st) and verifies (st.f_flag & 1) != 0.
+// On Dopamine/RootHide, root may be remounted R/W without ST_RDONLY, causing C-2.
+static int hook_statvfs(const char *path, struct statvfs *buf) {
+    if (!buf) {
+        errno = EFAULT;
+        return -1;
+    }
+    struct statfs sfs;
+    int ret = (int)syscall(SYS_statfs64, path, &sfs);
+    if (ret != 0) return ret;
+
+    buf->f_bsize = sfs.f_bsize;
+    buf->f_frsize = sfs.f_bsize;
+    buf->f_blocks = sfs.f_blocks;
+    buf->f_bfree = sfs.f_bfree;
+    buf->f_bavail = sfs.f_bavail;
+    buf->f_files = sfs.f_files;
+    buf->f_ffree = sfs.f_ffree;
+    buf->f_favail = sfs.f_ffree;
+    buf->f_fsid = (unsigned long)sfs.f_fsid.val[0];
+    buf->f_flag = 0;
+    if (sfs.f_flags & MNT_RDONLY)
+        buf->f_flag |= ST_RDONLY;
+    if (sfs.f_flags & MNT_NOSUID)
+        buf->f_flag |= ST_NOSUID;
+    buf->f_namemax = 1024;
+
+    if (gShouldHideJailbreak) {
+        Dl_info callerInfo;
+        bool callerIsJBDylib = (dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
+                                callerInfo.dli_fname != NULL &&
+                                strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
+        if (!callerIsJBDylib) {
+            buf->f_flag |= ST_RDONLY;
+            RH_LOG("statvfs(%s): forced ST_RDONLY (f_flag=0x%lx)", path ? path : "NULL", buf->f_flag);
+        }
+    }
+    return 0;
+}
+
+static int hook_fstatvfs(int fd, struct statvfs *buf) {
+    if (!buf) {
+        errno = EFAULT;
+        return -1;
+    }
+    struct statfs sfs;
+    int ret = (int)syscall(SYS_fstatfs64, fd, &sfs);
+    if (ret != 0) return ret;
+
+    buf->f_bsize = sfs.f_bsize;
+    buf->f_frsize = sfs.f_bsize;
+    buf->f_blocks = sfs.f_blocks;
+    buf->f_bfree = sfs.f_bfree;
+    buf->f_bavail = sfs.f_bavail;
+    buf->f_files = sfs.f_files;
+    buf->f_ffree = sfs.f_ffree;
+    buf->f_favail = sfs.f_ffree;
+    buf->f_fsid = (unsigned long)sfs.f_fsid.val[0];
+    buf->f_flag = 0;
+    if (sfs.f_flags & MNT_RDONLY)
+        buf->f_flag |= ST_RDONLY;
+    if (sfs.f_flags & MNT_NOSUID)
+        buf->f_flag |= ST_NOSUID;
+    buf->f_namemax = 1024;
+
+    if (gShouldHideJailbreak) {
+        Dl_info callerInfo;
+        bool callerIsJBDylib = (dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
+                                callerInfo.dli_fname != NULL &&
+                                strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
+        if (!callerIsJBDylib) {
+            buf->f_flag |= ST_RDONLY;
+            RH_LOG("fstatvfs(fd=%d): forced ST_RDONLY (f_flag=0x%lx)", fd, buf->f_flag);
+        }
+    }
+    return 0;
+}
+
+// ─── getfsstat() hook: filter jailbreak mounts and APFS snapshots ─────────────
+// VisaMobileFoundation (FileChecker.getMountedVolumesViaGetfsstat) enumerates mounts
+// directly via getfsstat() to spot jailbreak artifacts and check root MNT_RDONLY.
+static int hook_getfsstat(struct statfs *buf, int bufsize, int flags) {
+    int real_count = (int)syscall(SYS_getfsstat64, buf, bufsize, flags);
+    if (!gShouldHideJailbreak || real_count <= 0 || !buf) {
+        return real_count;
+    }
+
+    int clean_count = 0;
+    for (int i = 0; i < real_count; i++) {
+        const char *on = buf[i].f_mntonname;
+        const char *from = buf[i].f_mntfromname;
+
+        // Filter out jailbreak mounts
+        if (strstr(on, "/var/jb") || strstr(on, "jbroot") || strstr(on, "basebin") ||
+            strstr(from, "/var/jb") || strstr(from, "jbroot") || strstr(from, "basebin") ||
+            strstr(on, "/private/preboot") || strstr(from, "/private/preboot")) {
+            continue;
+        }
+
+        // Filter out snapshot '@' mounts
+        if (strcmp(on, "/") != 0 && strchr(from, '@') != NULL) {
+            continue;
+        }
+
+        // Filter out duplicate from-name mounts (bind mount detection)
+        bool duplicate = false;
+        for (int j = 0; j < clean_count; j++) {
+            if (strcmp(from, buf[j].f_mntfromname) == 0) {
+                duplicate = true;
+                break;
+            }
+        }
+        if (duplicate) continue;
+
+        // Ensure root mount has MNT_RDONLY
+        if (strcmp(on, "/") == 0) {
+            buf[i].f_flags |= MNT_RDONLY;
+        }
+
+        if (clean_count != i) {
+            buf[clean_count] = buf[i];
+        }
+        clean_count++;
+    }
+    RH_LOG("getfsstat filtered %d -> %d mounts", real_count, clean_count);
+    return clean_count;
 }
 
 // ─── Fix B: dyld image-list hooks to hide jailbreak dylibs from MC1 ──────────
@@ -1674,6 +1832,18 @@ void roothide_init_with_executable(const char* executable)
 
 		litehook_hook_function(statfs, hook_statfs);
 		RH_LOG("hook_statfs installed");
+
+		litehook_hook_function(fstatfs, hook_fstatfs);
+		RH_LOG("hook_fstatfs installed");
+
+		litehook_hook_function(statvfs, hook_statvfs);
+		RH_LOG("hook_statvfs installed");
+
+		litehook_hook_function(fstatvfs, hook_fstatvfs);
+		RH_LOG("hook_fstatvfs installed");
+
+		litehook_hook_function(getfsstat, hook_getfsstat);
+		RH_LOG("hook_getfsstat installed");
 
 		litehook_hook_function(lstat, hook_lstat);
 		RH_LOG("hook_lstat installed");
