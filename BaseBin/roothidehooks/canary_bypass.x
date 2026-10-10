@@ -447,9 +447,12 @@ static NSString *replaced_destinationOfSymbolicLinkAtPath(id self, SEL sel, NSSt
              strcmp(cp, "/usr/arm-apple-darwin9") == 0 ||
              jailbreakBypassShouldBlockPath(path))) {
             RH_LOG("NSFileMgr.destinationOfSymbolicLinkAtPath BLOCKED: %s", cp);
-            if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain
-                                                    code:NSFileReadNoSuchFileError
-                                                userInfo:nil];
+            if (error) {
+                NSInteger errCode = (access(cp, F_OK) == 0) ? NSFileReadUnknownError : NSFileReadNoSuchFileError;
+                *error = [NSError errorWithDomain:NSCocoaErrorDomain
+                                             code:errCode
+                                         userInfo:nil];
+            }
             return nil;
         }
     }
@@ -498,20 +501,57 @@ static BOOL replaced_NSData_writeToFile(id self, SEL sel, NSString *path, NSData
     return NO;
 }
 
-#ifdef RHHIDE_DEBUG
-// Diagnostic logger for any secondary UIWindow presentations (Styleguide alerts)
+// UIWindow presentation guard & alert suppressor:
+// Intercepts and blocks secondary UIWindow presentations triggered by SmartBanking's
+// RASP alert flow (Frame 1: 0x2028e34, Frame 2: 0xED20) to prevent the "C-2" dialog.
 static void (*orig_UIWindow_makeKeyAndVisible)(id self, SEL sel) = NULL;
 static void replaced_UIWindow_makeKeyAndVisible(id self, SEL sel) {
-    if (orig_UIWindow_makeKeyAndVisible) {
-        orig_UIWindow_makeKeyAndVisible(self, sel);
-    }
     @autoreleasepool {
+        NSArray *syms = [NSThread callStackSymbols];
+        NSArray *addrs = [NSThread callStackReturnAddresses];
+        const struct mach_header *main_hdr = _dyld_get_image_header(0);
+        uintptr_t main_base = main_hdr ? (uintptr_t)main_hdr : 0;
+
+        BOOL should_suppress = NO;
+        for (NSNumber *addrNum in addrs) {
+            uintptr_t addr = (uintptr_t)[addrNum unsignedLongLongValue];
+            if (main_base != 0 && addr >= main_base && addr < main_base + 0x6000000) {
+                uintptr_t off = addr - main_base;
+                // Frame 1: Styleguide Alert Dialog init (0x2028e34)
+                // Frame 2: Security check dispatch & format C-2 (0xED20 / 0xECD0)
+                if ((off >= 0x2028000 && off <= 0x2029500) ||
+                    (off >= 0xEC00 && off <= 0xF000)) {
+                    should_suppress = YES;
+                    RH_LOG("SmartBanking: [BLOCKED] UIWindow makeKeyAndVisible alert window SUPPRESSED (caller offset=0x%lx)", (unsigned long)off);
+                    break;
+                }
+            }
+        }
+        if (!should_suppress) {
+            for (NSString *s in syms) {
+                if ([s containsString:@"0x0000000104578e34"] ||
+                    [s containsString:@"0x000000010255ed20"]) {
+                    should_suppress = YES;
+                    RH_LOG("SmartBanking: [BLOCKED] UIWindow makeKeyAndVisible alert window SUPPRESSED (symbol match: %s)", [s UTF8String]);
+                    break;
+                }
+            }
+        }
+
+        if (should_suppress) {
+            return;
+        }
+
+        if (orig_UIWindow_makeKeyAndVisible) {
+            orig_UIWindow_makeKeyAndVisible(self, sel);
+        }
+
+#ifdef RHHIDE_DEBUG
         id rootVC = nil;
         if ([self respondsToSelector:@selector(rootViewController)]) {
             rootVC = [self valueForKey:@"rootViewController"];
         }
         (void)rootVC;
-        NSArray *syms = [NSThread callStackSymbols];
         RH_LOG("UIWindow makeKeyAndVisible: window=%p rootVC=%s (frames=%lu)",
                self,
                rootVC ? class_getName([rootVC class]) : "(nil)",
@@ -519,9 +559,9 @@ static void replaced_UIWindow_makeKeyAndVisible(id self, SEL sel) {
         for (NSString *s in syms) {
             RH_LOG("  callstack: %s", [s UTF8String]);
         }
+#endif
     }
 }
-#endif
 
 // ─── ZDefend bypass for VP Bank NEO ──────────────────────────────────────────
 //
@@ -982,7 +1022,14 @@ static bool hook_function_abs(void *target, void *replacement) {
     return true;
 }
 
-// (pass-through IMP removed — hook returns hardcoded clean JSON directly)
+// ─── BIDV SmartBanking: RASP Score Evaluator Neutralizer ─────────────────────
+// sub_10320704C evaluates check result x0 against threshold 100 (0x64).
+// Returning 100 ensures all RASP checks evaluate as CLEAN (key 0x2b count = 0),
+// directly bypassing the C-2 security alert flow.
+static uint32_t replaced_sb_score_checker(uint64_t val) {
+    RH_LOG("SmartBanking: [HIT] sub_10320704C score evaluator intercepted (input=0x%llx) -> returning 100 (CLEAN)", (unsigned long long)val);
+    return 100;
+}
 
 // ─── LC_SYMTAB runtime resolver ───────────────────────────────────────────────
 // Resolves a symbol from the binary's LC_SYMTAB nlist_64 table. This finds
@@ -1388,8 +1435,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 RH_LOG("NSData.writeToFile:options:error: hooked");
             }
 
-#ifdef RHHIDE_DEBUG
-            // Diagnostic UIWindow presentation logger:
+            // UIWindow presentation guard & alert suppressor:
             Class uiWinCls = objc_getClass("UIWindow");
             if (uiWinCls) {
                 Method m_mkav = class_getInstanceMethod(uiWinCls, @selector(makeKeyAndVisible));
@@ -1398,10 +1444,9 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                                     @selector(makeKeyAndVisible),
                                     (IMP)replaced_UIWindow_makeKeyAndVisible,
                                     (IMP *)&orig_UIWindow_makeKeyAndVisible);
-                    RH_LOG("UIWindow.makeKeyAndVisible diagnostic hooked");
+                    RH_LOG("UIWindow.makeKeyAndVisible alert guard hooked");
                 }
             }
-#endif
         }
         // ── Hook UIApplication canOpenURL: → NO for jailbreak tool schemes ───────
         // In SmartBanking (BIDV), do NOT hook UIApplication canOpenURL:!
@@ -2237,6 +2282,38 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     }
                 } else {
                     RH_LOG("SmartBanking: WrapperSecLib class NOT FOUND");
+                }
+            }
+
+            // ── BIDV SmartBanking: Universal RASP Score Evaluator Hook ───────────────
+            // sub_10320704C (Mach-O offset 0x320704C) is called by sub_1031FF840 to evaluate
+            // check results. Any score != 100 appends failure reasons to key 0x2b, which
+            // directly triggers the "C-2" alert dialog at 0xED20 / 0x2028e34.
+            // Hooking sub_10320704C to return 100 (CLEAN) guarantees key 0x2b remains empty
+            // (count == 0), causing 0xED20 to branch directly to normal app launch (0xEDE8).
+            {
+                const struct mach_header *sb_header = _dyld_get_image_header(0);
+                if (sb_header) {
+                    uintptr_t sb_base = (uintptr_t)sb_header;
+                    static const uint8_t pat_score_eval[16] = {
+                        0x08, 0x04, 0x00, 0xd1, 0x1f, 0x91, 0x01, 0xf1, 0x89, 0x0c, 0x80, 0x52, 0x00, 0x31, 0x89, 0x1a
+                    };
+                    void *fn_score = find_pattern_in_image((void *)sb_base, 0x4000000, pat_score_eval, sizeof(pat_score_eval));
+                    if (!fn_score) {
+                        uint32_t *target_ptr = (uint32_t *)(sb_base + 0x320704C);
+                        if (*target_ptr == 0xd1000408) {
+                            fn_score = (void *)target_ptr;
+                        }
+                    }
+                    if (fn_score) {
+                        if (hook_function_abs(fn_score, (void *)replaced_sb_score_checker)) {
+                            RH_LOG("SmartBanking: [SUCCESS] sub_10320704C RASP score evaluator hooked at %p -> constant 100 (CLEAN)", fn_score);
+                        } else {
+                            RH_LOG("SmartBanking: [FAIL] hook_function_abs failed on sub_10320704C at %p", fn_score);
+                        }
+                    } else {
+                        RH_LOG("SmartBanking: [WARN] sub_10320704C score evaluator not found (pattern and offset mismatch)");
+                    }
                 }
             }
 
