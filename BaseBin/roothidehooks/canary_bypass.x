@@ -241,7 +241,7 @@ static const char *const kJailbreakPathPatterns[] = {
     "/Applications/Sileo.app",     // Sileo package manager
     "/usr/share/zebra/",           // Zebra data directory
     "/Library/MobileSubstrate",    // MobileSubstrate directory
-    "/usr/sbin/",                  // System daemons / sandbox escape test (cfprefsd, sshd)
+    "/usr/sbin/frida-server",      // Frida server daemon
     "/usr/bin/ssh",                // OpenSSH client
     "/etc/apt",                    // APT configuration directory
     "/bin/bash",                   // Bash shell
@@ -443,6 +443,8 @@ static NSString *replaced_destinationOfSymbolicLinkAtPath(id self, SEL sel, NSSt
              strcmp(cp, "/usr/share") == 0 ||
              strcmp(cp, "/Library/Ringtones") == 0 ||
              strcmp(cp, "/Library/Wallpaper") == 0 ||
+             strcmp(cp, "/var/lib/undecimus/apt") == 0 ||
+             strcmp(cp, "/usr/arm-apple-darwin9") == 0 ||
              jailbreakBypassShouldBlockPath(path))) {
             RH_LOG("NSFileMgr.destinationOfSymbolicLinkAtPath BLOCKED: %s", cp);
             if (error) *error = [NSError errorWithDomain:NSCocoaErrorDomain

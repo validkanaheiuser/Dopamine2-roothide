@@ -472,8 +472,6 @@ static const char *const kBlockedPathPatterns[] = {
     "/usr/share/zebra/",        // Zebra data directory (BSZInspection)
     "/Library/MobileSubstrate", // MobileSubstrate/ElleKit tweak inject path
     "/usr/lib/TweakInject",     // TweakInject path (alternate substrate path)
-    "/usr/sbin/cfprefsd",       // Sandbox escape indicator: sandboxed apps get EPERM on this path;
-                                // access() returning 0 signals sandbox escape to sub_102A3814C.
     "/bin/sh",
     "/bin/bash",
     "/etc/ssh",
@@ -530,16 +528,20 @@ static int hook_access(const char *path, int mode) {
                     return -1;
                 }
             }
+            // Canary pass: BlueShield sub_10324CFD8 (0x10324d7c8-0x10324d7d8) calls access("/usr/sbin/cfprefsd", 0).
+            // It expects access == 0 (cbz w0, 0x10324d860). If access != 0, it branches to 0x10324d7dc,
+            // sets reason = 3, throws a Swift Error, and triggers the C-2 dialog.
+            // Returning 0 satisfies the canary integrity probe without triggering detection.
+            if (strstr(path, "cfprefsd") != NULL) {
+                RH_LOG("access PASS(canary cfprefsd -> 0): %s", path);
+                return 0;
+            }
+
             // Substring-match block (BSZInspection, cekL3Int — broader jailbreak paths).
             for (int i = 0; kBlockedPathPatterns[i]; i++) {
                 if (strstr(path, kBlockedPathPatterns[i]) != NULL) {
-                    if (strstr(path, "cfprefsd") != NULL) {
-                        RH_LOG("access BLOCKED(sandbox-emul EPERM): %s", path);
-                        errno = EPERM;
-                    } else {
-                        RH_LOG("access BLOCKED(pattern=%s): %s", kBlockedPathPatterns[i], path);
-                        errno = ENOENT;
-                    }
+                    RH_LOG("access BLOCKED(pattern=%s): %s", kBlockedPathPatterns[i], path);
+                    errno = ENOENT;
                     return -1;
                 }
             }
