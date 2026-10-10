@@ -456,6 +456,63 @@ static NSString *replaced_destinationOfSymbolicLinkAtPath(id self, SEL sel, NSSt
     return orig_destinationOfSymbolicLinkAtPath(self, sel, path, error);
 }
 
+// ─── Sandbox Write Escape Probing Interception ────────────────────────────────
+// VMF / IOSSecuritySuite (0xE68C checkRestrictedDirectoriesWriteable) tests writing
+// "AmIJailbroken?" to restricted locations (/, /root/, /private/, /jb/).
+// On stock iOS, sandbox prevents writing outside container -> throws EPERM error.
+// If any probe succeeds, it flags jailbreak. Intercept NSString & NSData writeToFile
+// outside container and return NO with EPERM error to simulate strict Apple sandbox.
+static BOOL (*orig_NSString_writeToFile)(id self, SEL sel, NSString *path, BOOL useAuxiliaryFile, NSStringEncoding enc, NSError **error) = NULL;
+static BOOL replaced_NSString_writeToFile(id self, SEL sel, NSString *path, BOOL useAuxiliaryFile, NSStringEncoding enc, NSError **error) {
+    if (path) {
+        const char *cp = [path UTF8String];
+        if (cp && cp[0] == '/' &&
+            strstr(cp, "/Containers/") == NULL &&
+            strstr(cp, "/tmp") == NULL) {
+            RH_LOG("NSString.writeToFile BLOCKED (sandbox write probe outside container): %s", cp);
+            if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:EPERM userInfo:nil];
+            return NO;
+        }
+    }
+    if (orig_NSString_writeToFile) {
+        return orig_NSString_writeToFile(self, sel, path, useAuxiliaryFile, enc, error);
+    }
+    return NO;
+}
+
+static BOOL (*orig_NSData_writeToFile)(id self, SEL sel, NSString *path, NSDataWritingOptions writeOptionsMask, NSError **error) = NULL;
+static BOOL replaced_NSData_writeToFile(id self, SEL sel, NSString *path, NSDataWritingOptions writeOptionsMask, NSError **error) {
+    if (path) {
+        const char *cp = [path UTF8String];
+        if (cp && cp[0] == '/' &&
+            strstr(cp, "/Containers/") == NULL &&
+            strstr(cp, "/tmp") == NULL) {
+            RH_LOG("NSData.writeToFile BLOCKED (sandbox write probe outside container): %s", cp);
+            if (error) *error = [NSError errorWithDomain:NSPOSIXErrorDomain code:EPERM userInfo:nil];
+            return NO;
+        }
+    }
+    if (orig_NSData_writeToFile) {
+        return orig_NSData_writeToFile(self, sel, path, writeOptionsMask, error);
+    }
+    return NO;
+}
+
+// Diagnostic logger for any secondary UIWindow presentations (Styleguide alerts)
+static void (*orig_UIWindow_makeKeyAndVisible)(id self, SEL sel) = NULL;
+static void replaced_UIWindow_makeKeyAndVisible(id self, SEL sel) {
+    if (orig_UIWindow_makeKeyAndVisible) {
+        orig_UIWindow_makeKeyAndVisible(self, sel);
+    }
+    @autoreleasepool {
+        UIViewController *rootVC = [(UIWindow *)self rootViewController];
+        RH_LOG("UIWindow makeKeyAndVisible: window=%p rootVC=%s callstack:\n%s",
+               self,
+               rootVC ? class_getName([rootVC class]) : "(nil)",
+               [[[NSThread callStackSymbols] componentsJoinedByString:@"\n"] UTF8String]);
+    }
+}
+
 // ─── ZDefend bypass for VP Bank NEO ──────────────────────────────────────────
 //
 // ZDefend.framework (Zimperium z9 RASP SDK) uses Direct Syscalls (SVC 0x80) for
@@ -1298,6 +1355,38 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                             (IMP)replaced_destinationOfSymbolicLinkAtPath,
                             (IMP *)&orig_destinationOfSymbolicLinkAtPath);
             RH_LOG("NSFileManager.destinationOfSymbolicLinkAtPath:error: hooked");
+        }
+        {
+            // Sandbox write escape probe defense:
+            Method m_strWrite = class_getInstanceMethod([NSString class], @selector(writeToFile:atomically:encoding:error:));
+            if (m_strWrite) {
+                MSHookMessageEx([NSString class],
+                                @selector(writeToFile:atomically:encoding:error:),
+                                (IMP)replaced_NSString_writeToFile,
+                                (IMP *)&orig_NSString_writeToFile);
+                rh_record_method(m_strWrite, (IMP)orig_NSString_writeToFile);
+                RH_LOG("NSString.writeToFile:atomically:encoding:error: hooked");
+            }
+
+            Method m_dataWrite = class_getInstanceMethod([NSData class], @selector(writeToFile:options:error:));
+            if (m_dataWrite) {
+                MSHookMessageEx([NSData class],
+                                @selector(writeToFile:options:error:),
+                                (IMP)replaced_NSData_writeToFile,
+                                (IMP *)&orig_NSData_writeToFile);
+                rh_record_method(m_dataWrite, (IMP)orig_NSData_writeToFile);
+                RH_LOG("NSData.writeToFile:options:error: hooked");
+            }
+
+            // Diagnostic UIWindow presentation logger:
+            Method m_mkav = class_getInstanceMethod([UIWindow class], @selector(makeKeyAndVisible));
+            if (m_mkav) {
+                MSHookMessageEx([UIWindow class],
+                                @selector(makeKeyAndVisible),
+                                (IMP)replaced_UIWindow_makeKeyAndVisible,
+                                (IMP *)&orig_UIWindow_makeKeyAndVisible);
+                RH_LOG("UIWindow.makeKeyAndVisible diagnostic hooked");
+            }
         }
         // ── Hook UIApplication canOpenURL: → NO for jailbreak tool schemes ───────
         // In SmartBanking (BIDV), do NOT hook UIApplication canOpenURL:!

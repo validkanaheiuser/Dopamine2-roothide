@@ -843,6 +843,10 @@ static int hook_statvfs(const char *path, struct statvfs *buf) {
                                 strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
         if (!callerIsJBDylib) {
             buf->f_flag |= ST_RDONLY;
+            // Swift FileChecker at 0x29730 reads [sp, #0x30] and expects ST_RDONLY (bit 0 == 1)
+            // with high bits clear ((x8 >> 31) == 0). Set offsets 0x30, 0x38, and f_flag.
+            *(uint64_t *)((char *)buf + 0x30) = 1;
+            *(uint64_t *)((char *)buf + 0x38) = 1;
             RH_LOG("statvfs(%s): forced ST_RDONLY (f_flag=0x%lx)", path ? path : "NULL", buf->f_flag);
         }
     }
@@ -881,6 +885,8 @@ static int hook_fstatvfs(int fd, struct statvfs *buf) {
                                 strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
         if (!callerIsJBDylib) {
             buf->f_flag |= ST_RDONLY;
+            *(uint64_t *)((char *)buf + 0x30) = 1;
+            *(uint64_t *)((char *)buf + 0x38) = 1;
             RH_LOG("fstatvfs(fd=%d): forced ST_RDONLY (f_flag=0x%lx)", fd, buf->f_flag);
         }
     }
@@ -891,10 +897,40 @@ static int hook_fstatvfs(int fd, struct statvfs *buf) {
 // VisaMobileFoundation (FileChecker.getMountedVolumesViaGetfsstat) enumerates mounts
 // directly via getfsstat() to spot jailbreak artifacts and check root MNT_RDONLY.
 static int hook_getfsstat(struct statfs *buf, int bufsize, int flags) {
-    int real_count = (int)syscall(SYS_getfsstat64, buf, bufsize, flags);
-    if (!gShouldHideJailbreak || real_count <= 0 || !buf) {
-        return real_count;
+    if (!gShouldHideJailbreak) {
+        return (int)syscall(SYS_getfsstat64, buf, bufsize, flags);
     }
+
+    if (!buf || bufsize <= 0) {
+        // Caller queries count before allocating buffer (e.g. getMountedVolumesViaGetfsstat).
+        // Must return clean_count so count == resultCode check in Swift passes!
+        int max_count = (int)syscall(SYS_getfsstat64, NULL, 0, flags);
+        if (max_count <= 0) return max_count;
+        struct statfs *tmp = (struct statfs *)malloc(sizeof(struct statfs) * max_count);
+        if (!tmp) return max_count;
+        int real = (int)syscall(SYS_getfsstat64, tmp, sizeof(struct statfs) * max_count, flags);
+        int clean = 0;
+        for (int i = 0; i < real; i++) {
+            const char *on = tmp[i].f_mntonname;
+            const char *from = tmp[i].f_mntfromname;
+            if (strstr(on, "/var/jb") || strstr(on, "jbroot") || strstr(on, "basebin") ||
+                strstr(from, "/var/jb") || strstr(from, "jbroot") || strstr(from, "basebin") ||
+                strstr(on, "/private/preboot") || strstr(from, "/private/preboot")) continue;
+            if (strcmp(on, "/") != 0 && strchr(from, '@') != NULL) continue;
+            bool duplicate = false;
+            for (int j = 0; j < clean; j++) {
+                if (strcmp(from, tmp[j].f_mntfromname) == 0) { duplicate = true; break; }
+            }
+            if (duplicate) continue;
+            clean++;
+        }
+        free(tmp);
+        RH_LOG("getfsstat(NULL) predicted %d clean mounts (raw %d)", clean, max_count);
+        return clean;
+    }
+
+    int real_count = (int)syscall(SYS_getfsstat64, buf, bufsize, flags);
+    if (real_count <= 0) return real_count;
 
     int clean_count = 0;
     for (int i = 0; i < real_count; i++) {
@@ -923,9 +959,9 @@ static int hook_getfsstat(struct statfs *buf, int bufsize, int flags) {
         }
         if (duplicate) continue;
 
-        // Ensure root mount has MNT_RDONLY
+        // Ensure root mount has MNT_RDONLY and MNT_ROOTFS
         if (strcmp(on, "/") == 0) {
-            buf[i].f_flags |= MNT_RDONLY;
+            buf[i].f_flags |= (MNT_RDONLY | MNT_ROOTFS);
         }
 
         if (clean_count != i) {
