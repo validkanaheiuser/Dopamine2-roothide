@@ -498,6 +498,7 @@ static BOOL replaced_NSData_writeToFile(id self, SEL sel, NSString *path, NSData
     return NO;
 }
 
+#ifdef RHHIDE_DEBUG
 // Diagnostic logger for any secondary UIWindow presentations (Styleguide alerts)
 static void (*orig_UIWindow_makeKeyAndVisible)(id self, SEL sel) = NULL;
 static void replaced_UIWindow_makeKeyAndVisible(id self, SEL sel) {
@@ -509,12 +510,14 @@ static void replaced_UIWindow_makeKeyAndVisible(id self, SEL sel) {
         if ([self respondsToSelector:@selector(rootViewController)]) {
             rootVC = [self valueForKey:@"rootViewController"];
         }
+        (void)rootVC;
         RH_LOG("UIWindow makeKeyAndVisible: window=%p rootVC=%s callstack:\n%s",
                self,
                rootVC ? class_getName([rootVC class]) : "(nil)",
                [[[NSThread callStackSymbols] componentsJoinedByString:@"\n"] UTF8String]);
     }
 }
+#endif
 
 // ─── ZDefend bypass for VP Bank NEO ──────────────────────────────────────────
 //
@@ -1381,6 +1384,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 RH_LOG("NSData.writeToFile:options:error: hooked");
             }
 
+#ifdef RHHIDE_DEBUG
             // Diagnostic UIWindow presentation logger:
             Class uiWinCls = objc_getClass("UIWindow");
             if (uiWinCls) {
@@ -1393,6 +1397,7 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                     RH_LOG("UIWindow.makeKeyAndVisible diagnostic hooked");
                 }
             }
+#endif
         }
         // ── Hook UIApplication canOpenURL: → NO for jailbreak tool schemes ───────
         // In SmartBanking (BIDV), do NOT hook UIApplication canOpenURL:!
