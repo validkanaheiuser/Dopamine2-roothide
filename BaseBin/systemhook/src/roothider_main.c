@@ -10,6 +10,7 @@
 #include <sys/syscall.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <mach-o/dyld.h>
 #include <mach-o/dyld_images.h>
 #include <mach-o/loader.h>
 #include <mach/task.h>
@@ -441,6 +442,12 @@ bool dyld_patch_fallback_enabled = false;
 static bool gShouldHideJailbreak = false;
 static char gExecutablePath[PATH_MAX] = {0};
 
+// Snapshot of the real dyld_all_image_infos pointer, captured BEFORE
+// canaryBypassInit() hooks task_info. After that hook is active,
+// get_image_infos() returns the filtered struct (no JB images). raw_dladdr
+// and Pillar 3 callbacks need the unfiltered view to detect JB callers.
+static const struct dyld_all_image_infos *s_raw_dyld_infos = NULL;
+
 // ─── Fix A: access() hook for IOSSecuritySuite file-existence checks ─────────
 //
 // IOSSecuritySuite calls access("/usr/lib/roothideinit.dylib", F_OK) etc. to
@@ -517,7 +524,7 @@ static int hook_access(const char *path, int mode) {
         // For JB-dylib callers (Crane, TweakLoader): block TweakInject paths to prevent
         // user tweaks from loading (see else branch). Pass through everything else.
         Dl_info callerInfo;
-        bool callerIsJBDylib = (dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
+        bool callerIsJBDylib = (raw_dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
                                 callerInfo.dli_fname != NULL &&
                                 strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
         if (!callerIsJBDylib) {
@@ -590,7 +597,7 @@ static int hook_access(const char *path, int mode) {
 static pid_t hook_fork(void) {
     if (gShouldHideJailbreak) {
         Dl_info info;
-        if (dladdr(__builtin_return_address(0), &info) &&
+        if (raw_dladdr(__builtin_return_address(0), &info) &&
             info.dli_fname && strstr(info.dli_fname, "MBRaspSdk")) {
             // MBRaspSdk sub_14F44 fork check — let it succeed so sub_14F44
             // returns 0 (clean). Exit child immediately; sub_14F44 also
@@ -784,7 +791,7 @@ static int hook_statfs(const char *path, struct statfs *buf) {
     int ret = (int)syscall(SYS_statfs64, path, buf);
     if (gShouldHideJailbreak && ret == 0 && buf) {
         Dl_info callerInfo;
-        bool callerIsJBDylib = (dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
+        bool callerIsJBDylib = (raw_dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
                                 callerInfo.dli_fname != NULL &&
                                 strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
         if (!callerIsJBDylib) {
@@ -798,7 +805,7 @@ static int hook_fstatfs(int fd, struct statfs *buf) {
     int ret = (int)syscall(SYS_fstatfs64, fd, buf);
     if (gShouldHideJailbreak && ret == 0 && buf) {
         Dl_info callerInfo;
-        bool callerIsJBDylib = (dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
+        bool callerIsJBDylib = (raw_dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
                                 callerInfo.dli_fname != NULL &&
                                 strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
         if (!callerIsJBDylib) {
@@ -839,7 +846,7 @@ static int hook_statvfs(const char *path, struct statvfs *buf) {
 
     if (gShouldHideJailbreak) {
         Dl_info callerInfo;
-        bool callerIsJBDylib = (dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
+        bool callerIsJBDylib = (raw_dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
                                 callerInfo.dli_fname != NULL &&
                                 strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
         if (!callerIsJBDylib) {
@@ -881,7 +888,7 @@ static int hook_fstatvfs(int fd, struct statvfs *buf) {
 
     if (gShouldHideJailbreak) {
         Dl_info callerInfo;
-        bool callerIsJBDylib = (dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
+        bool callerIsJBDylib = (raw_dladdr(__builtin_return_address(0), &callerInfo) != 0 &&
                                 callerInfo.dli_fname != NULL &&
                                 strstr(callerInfo.dli_fname, "/.jbroot-") != NULL);
         if (!callerIsJBDylib) {
@@ -988,6 +995,41 @@ static const struct dyld_all_image_infos *get_image_infos(void) {
     if (task_info(mach_task_self_, TASK_DYLD_INFO, (task_info_t)&di, &cnt) != KERN_SUCCESS)
         return NULL;
     return (const struct dyld_all_image_infos *)(uintptr_t)di.all_image_info_addr;
+}
+
+// ─── raw_dladdr: dladdr implemented directly from dyld_all_image_infos ────────
+// Used internally instead of dladdr() once hook_dladdr is installed.
+// Reads from s_raw_dyld_infos (unfiltered, set before task_info is hooked) so
+// callerIsJBDylib checks in hook_access etc. correctly see JB library paths.
+// Falls back to get_image_infos() before s_raw_dyld_infos is set.
+// Only fills dli_fname and dli_fbase; dli_sname/dli_saddr are set to NULL
+// (app RASP code only reads dli_fname; internal callers only check dli_fname).
+static int raw_dladdr(const void *addr, Dl_info *info) {
+    if (!info || !addr) return 0;
+    memset(info, 0, sizeof(*info));
+
+    const struct dyld_all_image_infos *infos = s_raw_dyld_infos;
+    if (!infos) infos = get_image_infos();
+    if (!infos) return 0;
+
+    const struct dyld_image_info *arr = infos->infoArray;
+    uint32_t count = infos->infoArrayCount;
+    if (!arr || !count) return 0;
+
+    uintptr_t addr_ui = (uintptr_t)addr;
+    const struct dyld_image_info *best = NULL;
+    for (uint32_t i = 0; i < count; i++) {
+        uintptr_t load = (uintptr_t)arr[i].imageLoadAddress;
+        if (load <= addr_ui) {
+            if (!best || load > (uintptr_t)best->imageLoadAddress)
+                best = &arr[i];
+        }
+    }
+    if (!best) return 0;
+
+    info->dli_fname = best->imageFilePath;
+    info->dli_fbase = (void *)best->imageLoadAddress;
+    return 1;
 }
 
 static inline bool ci_contains(const char *haystack, const char *needle) {
@@ -1178,6 +1220,110 @@ static void init_image_list_hooks(void) {
     litehook_hook_function(_dyld_get_image_vmaddr_slide, hook__dyld_get_image_vmaddr_slide);
     void *p = dlsym(RTLD_DEFAULT, "_dyld_get_all_image_infos");
     if (p) litehook_hook_function(p, hook__dyld_get_all_image_infos);
+}
+
+// ─── Pillar 1: Hook & Spoof dladdr (BIDV C-2 Channel 1) ─────────────────────
+//
+// VNPayShield (sub_1032D5A04 & sub_1032595C8) calls dlsym(RTLD_DEFAULT/RTLD_NEXT,
+// sym_name) to get pointers to system functions (task_info, access, task_threads,
+// etc.), then passes those pointers to dladdr(ptr, &info). Because BaseBin hooks
+// those functions via inline trampoline (litehook), the pointer returned by dlsym
+// resolves inside systemhook-*.dylib or roothidehooks.dylib. dladdr then exposes
+// a path like "/.jbroot-XXXX/usr/lib/systemhook-XXXX.dylib" in info.dli_fname,
+// which hits the 27-string jailbreak Blacklist in sub_1031FFEAC State 8 → C-2.
+//
+// Fix: hook dladdr() with litehook (in-place, no trampoline). Use raw_dladdr()
+// (direct dyld_all_image_infos scan) as the replacement implementation, then
+// spoof dli_fname to /usr/lib/system/libsystem_kernel.dylib when it resolves
+// to a jailbreak dylib.
+//
+// All internal callers of dladdr() in this file have been updated to raw_dladdr()
+// so they receive unfiltered results for callerIsJBDylib detection.
+static int hook_dladdr(const void *addr, Dl_info *info) {
+    if (!info) return 0;
+    int ret = raw_dladdr(addr, info);
+    if (!gShouldHideJailbreak || !ret || !info->dli_fname) return ret;
+    if (!is_jailbreak_image(info->dli_fname)) return ret;
+
+    // The address resolved to a jailbreak dylib (likely a hook trampoline for
+    // a system function). Return a plausible system library path so VNPayShield's
+    // dli_fname whitelist check (/usr/lib/ or /System/Library/) passes.
+    info->dli_fname = "/usr/lib/system/libsystem_kernel.dylib";
+    const struct dyld_all_image_infos *raw = s_raw_dyld_infos;
+    if (raw && raw->infoArray) {
+        for (uint32_t i = 0; i < raw->infoArrayCount; i++) {
+            const char *p = raw->infoArray[i].imageFilePath;
+            if (p && strstr(p, "libsystem_kernel.dylib")) {
+                info->dli_fbase = (void *)raw->infoArray[i].imageLoadAddress;
+                break;
+            }
+        }
+    }
+    RH_LOG("dladdr SPOOFED: addr=%p -> libsystem_kernel.dylib", addr);
+    return ret;
+}
+
+// ─── Pillar 3: Wrap _dyld_register_func_for_add_image (BIDV C-2 Channel 3) ──
+//
+// If the app registers a callback via _dyld_register_func_for_add_image, dyld
+// replays ALL currently-loaded images to the callback including jailbreak dylibs
+// loaded early via DYLD_INSERT_LIBRARIES. Paths like systemhook-*.dylib or
+// roothidehooks.dylib would be passed to the callback, feeding the State-8
+// intersection check.
+//
+// Fix (two-step with litehook in-place):
+//   Step 1 (called first, before hook): register filtered_add_image_dispatch
+//     directly with real dyld. It filters JB images and dispatches clean ones
+//     to all app-registered callbacks stored in s_add_image_callbacks.
+//   Step 2 (hook): hook _dyld_register_func_for_add_image so app registrations
+//     store the callback in s_add_image_callbacks and replay clean images
+//     manually (replacing the real dyld replay which would include JB images).
+
+typedef void (*add_image_func_t)(const struct mach_header *, intptr_t);
+
+#define MAX_ADD_IMAGE_CALLBACKS 16
+static add_image_func_t s_add_image_callbacks[MAX_ADD_IMAGE_CALLBACKS];
+static int s_add_image_callback_count = 0;
+
+static void filtered_add_image_dispatch(const struct mach_header *mh, intptr_t slide) {
+    if (!mh) return;
+    const struct dyld_all_image_infos *raw = s_raw_dyld_infos;
+    if (raw && raw->infoArray) {
+        for (uint32_t i = 0; i < raw->infoArrayCount; i++) {
+            if ((uintptr_t)raw->infoArray[i].imageLoadAddress == (uintptr_t)mh) {
+                if (is_jailbreak_image(raw->infoArray[i].imageFilePath)) {
+                    RH_LOG("add_image FILTERED: %s", raw->infoArray[i].imageFilePath ?: "(null)");
+                    return;
+                }
+                break;
+            }
+        }
+    }
+    for (int i = 0; i < s_add_image_callback_count; i++) {
+        if (s_add_image_callbacks[i]) s_add_image_callbacks[i](mh, slide);
+    }
+}
+
+static void hook__dyld_register_func_for_add_image(add_image_func_t func) {
+    if (!func) return;
+    RH_LOG("_dyld_register_func_for_add_image INTERCEPTED: func=%p", (void *)func);
+    if (s_add_image_callback_count >= MAX_ADD_IMAGE_CALLBACKS) {
+        RH_LOG("add_image callback table full, dropping func=%p", (void *)func);
+        return;
+    }
+    s_add_image_callbacks[s_add_image_callback_count++] = func;
+    // Replay non-jailbreak images to func (what real dyld would do, minus JB images)
+    const struct dyld_all_image_infos *raw = s_raw_dyld_infos;
+    if (raw && raw->infoArray) {
+        for (uint32_t i = 0; i < raw->infoArrayCount; i++) {
+            const char *path = raw->infoArray[i].imageFilePath;
+            if (is_jailbreak_image(path)) continue;
+            const struct mach_header *img_mh =
+                (const struct mach_header *)raw->infoArray[i].imageLoadAddress;
+            intptr_t img_slide = compute_vmaddr_slide(img_mh);
+            func(img_mh, img_slide);
+        }
+    }
 }
 
 // ─── Fix C: BSDPMRHide ObjC canary protection ────────────────────────────────
@@ -1899,6 +2045,17 @@ void roothide_init_with_executable(const char* executable)
 		gShouldHideJailbreak = true;  // activates Fix B (dyld image-list filter)
 		RH_LOG("ACTIVATED pid=%d exe=%s rasp=%d", getpid(), executable, (int)isRaspApp);
 
+		// Capture real dyld_all_image_infos pointer BEFORE canaryBypassInit() hooks
+		// task_info. After that hook is active, get_image_infos() returns the filtered
+		// struct; raw_dladdr and Pillar 3 need the unfiltered live pointer.
+		{
+			task_dyld_info_data_t _di;
+			mach_msg_type_number_t _cnt = TASK_DYLD_INFO_COUNT;
+			if (task_info(mach_task_self_, TASK_DYLD_INFO, (task_info_t)&_di, &_cnt) == KERN_SUCCESS)
+				s_raw_dyld_infos = (const struct dyld_all_image_infos *)(uintptr_t)_di.all_image_info_addr;
+			RH_LOG("s_raw_dyld_infos=%p", (void *)s_raw_dyld_infos);
+		}
+
 		// Fix A: hook access() for IOSSecuritySuite file-existence checks.
 		litehook_hook_function(access, hook_access);
 		RH_LOG("hook_access installed");
@@ -1937,6 +2094,23 @@ void roothide_init_with_executable(const char* executable)
 		litehook_hook_function(fork, hook_fork);
 		RH_LOG("hook_fork installed");
 
+		// Pillar 1: hook dladdr() to spoof JB dylib paths in Dl_info.dli_fname.
+		// VNPayShield calls dlsym() for system functions, then dladdr(ptr, &info)
+		// to check dli_fname. Since BaseBin hooks those functions, the ptr points
+		// into systemhook/roothidehooks → dli_fname leaks jbroot path → C-2.
+		// hook_dladdr uses raw_dladdr (direct dyld_all_image_infos scan) as its
+		// implementation and spoofs JB paths to libsystem_kernel.dylib.
+		litehook_hook_function(dladdr, hook_dladdr);
+		RH_LOG("hook_dladdr installed (Pillar 1)");
+
+		// Pillar 3: intercept _dyld_register_func_for_add_image so app callbacks
+		// never receive jailbreak image notifications.
+		// Step 1: register our dispatcher with the REAL function (before patching).
+		_dyld_register_func_for_add_image(filtered_add_image_dispatch);
+		// Step 2: patch the function so future app registrations go through the filter.
+		litehook_hook_function(_dyld_register_func_for_add_image, hook__dyld_register_func_for_add_image);
+		RH_LOG("hook__dyld_register_func_for_add_image installed (Pillar 3)");
+
 		// reason=9 (iOS16+): developer_mode_status sysctl spoofing.
 		// reason=4 (all iOS): clear P_SELECT (bit 0x40) from kp_proc.p_flag so
 		// MBRaspSdk sub_E600 (hackingTools type 8) always reads a clean kinfo_proc.
@@ -1974,6 +2148,14 @@ void roothide_init_with_executable(const char* executable)
 			void (*zdefendBypassInit)(void) = dlsym(rhhooks, "zdefendBypassInit");
 			RH_LOG("zdefendBypassInit=%p", zdefendBypassInit);
 			if (zdefendBypassInit) zdefendBypassInit();
+
+			// Pillar 2: hook realpath / realpath$DARWIN_EXTSN via MSHookFunction
+			// (needs trampoline to call orig). VNPayShield sub_1032DD6D4 scans dyld
+			// images with /Frameworks/ in their path and calls realpath(image_name)
+			// which resolves bind-mounts back to /.jbroot-UUID/... → C-2.
+			void (*bidvBypassInit)(void) = dlsym(rhhooks, "bidvBypassInit");
+			RH_LOG("bidvBypassInit=%p", bidvBypassInit);
+			if (bidvBypassInit) bidvBypassInit();
 
 			log_hidden_images();
 		}

@@ -2525,3 +2525,103 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
 #endif
     }
 }
+
+// ─── Pillar 2: Hook & Sanitize realpath / realpath$DARWIN_EXTSN ──────────────
+//
+// VNPayShield sub_1032DD6D4 (sub_1031EF1D4) iterates the dyld image list,
+// selects images whose path contains "/Frameworks/", and calls
+// realpath$DARWIN_EXTSN(image_name, 0) on each one. On RootHide, bind-mounts
+// make injected dylibs accessible via normal paths, but APFS realpath resolves
+// the bind-mount back to the canonical path /.jbroot-UUID/...  The resolved
+// path then contains "jbroot", "systemhook", etc. and hits the 27-string
+// Blacklist in sub_1031FFEAC State 8 → C-2.
+//
+// Fix: intercept realpath and realpath$DARWIN_EXTSN. Call the original to get
+// the canonical path. If the result starts with /.jbroot-UUID/, strip that
+// prefix and return the bare path underneath. If the path is a jailbreak-only
+// artifact (no clean equivalent), return NULL / ENOENT.
+//
+// MSHookFunction is used instead of litehook because realpath must call the
+// original to produce a canonical path. litehook patches in-place with no
+// trampoline; calling the original from within a litehook causes infinite
+// recursion.
+
+static char *(*orig_realpath)(const char * __restrict, char * __restrict) = NULL;
+static char *(*orig_realpath_darwin_extsn)(const char * __restrict, char * __restrict) = NULL;
+
+static inline bool rp_is_jailbreak_path(const char *p) {
+    if (!p) return false;
+    return strstr(p, "/.jbroot-") != NULL
+        || strstr(p, "/var/jb/") != NULL
+        || strstr(p, "/basebin/") != NULL;
+}
+
+static char *sanitize_realpath_result(char *result, char * __restrict resolved_path) {
+    if (!result) return result;
+
+    // Find /.jbroot-<uuid>/ at the start of the resolved path
+    if (strncmp(result, "/.jbroot-", 9) == 0) {
+        const char *slash = strchr(result + 1, '/');
+        if (slash) {
+            // slash points to the clean path, e.g. "/usr/lib/..." or "/var/containers/..."
+            if (resolved_path) {
+                memmove(resolved_path, slash, strlen(slash) + 1);
+                return resolved_path;
+            } else {
+                char *clean = strdup(slash);
+                free(result);
+                return clean;
+            }
+        }
+    }
+
+    // Path contains jailbreak marker but not a clean-strippable prefix → hide
+    if (rp_is_jailbreak_path(result)) {
+        RH_LOG("realpath BLOCKED jbroot path: %s", result);
+        if (!resolved_path) free(result);
+        else resolved_path[0] = '\0';
+        errno = ENOENT;
+        return NULL;
+    }
+
+    return result;
+}
+
+static char *replaced_realpath(const char * __restrict path,
+                                char * __restrict resolved_path) {
+    char *result = orig_realpath ? orig_realpath(path, resolved_path) : NULL;
+    return sanitize_realpath_result(result, resolved_path);
+}
+
+static char *replaced_realpath_darwin_extsn(const char * __restrict path,
+                                             char * __restrict resolved_path) {
+    char *result = orig_realpath_darwin_extsn
+                   ? orig_realpath_darwin_extsn(path, resolved_path)
+                   : NULL;
+    return sanitize_realpath_result(result, resolved_path);
+}
+
+__attribute__((visibility("default"))) void bidvBypassInit(void) {
+    RH_LOG("bidvBypassInit called (build: " RHHOOKS_VERSION ")");
+
+    // Hook realpath
+    MSHookFunction((void *)realpath,
+                   (void *)replaced_realpath,
+                   (void **)&orig_realpath);
+    RH_LOG("realpath hooked orig=%p", (void *)orig_realpath);
+
+    // Hook realpath$DARWIN_EXTSN (the variant BIDV sub_1031EF1D4 calls directly)
+    void *rp_extsn = dlsym(RTLD_DEFAULT, "realpath$DARWIN_EXTSN");
+    if (rp_extsn && rp_extsn != (void *)realpath) {
+        MSHookFunction(rp_extsn,
+                       (void *)replaced_realpath_darwin_extsn,
+                       (void **)&orig_realpath_darwin_extsn);
+        RH_LOG("realpath$DARWIN_EXTSN hooked orig=%p", (void *)orig_realpath_darwin_extsn);
+    } else if (rp_extsn == (void *)realpath) {
+        // Same body → orig_realpath trampoline covers it; point extsn orig there too
+        orig_realpath_darwin_extsn = orig_realpath;
+        RH_LOG("realpath$DARWIN_EXTSN shares body with realpath, covered by single hook");
+    } else {
+        RH_LOG("realpath$DARWIN_EXTSN: dlsym returned NULL");
+    }
+}
