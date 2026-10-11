@@ -226,11 +226,12 @@ static inline void rh_log(const char *fmt, ...) {
 //       argument as the caller passes it. No bypass via symlinks at this layer.
 //
 // §3B B2 edge cases:
-//   (a) Direct task_info bypass: DOPAMINE_WEAKNESS.md §3B explicitly names
-//       _dyld_image_count/_dyld_get_image_name as the vectors. Reading
-//       dyld_all_image_infos via task_info requires detailed knowledge of the
-//       dyld internal struct layout and is not typical app RASP code. No
-//       evidence of this in DOPAMINE_WEAKNESS.md.
+//   (a) Direct task_info bypass: SmartBanking (v5.3.12, 0x1031A3DCC & 0x1032527A4)
+//       queries task_info(mach_task_self(), TASK_DYLD_INFO) to bypass standard dyld
+//       APIs: 0x1031A3DCC checks sharedCacheBaseAddress (offset 0xb0) against "dyld_v1",
+//       and 0x1032527A4 walks infoArray to detect injected jailbreak libraries.
+//       This vector is handled by hooking task_info via MSHookFunction in canary_bypass.x,
+//       returning sanitized dyld_all_image_infos while preserving sharedCacheBaseAddress.
 //   (b) NSBundle/CFBundle enumeration: these enumerate only registered NSBundle
 //       objects (app + framework bundles), not all dyld images. Jailbreak dylibs
 //       are not registered as NSBundles. Not a bypass vector.

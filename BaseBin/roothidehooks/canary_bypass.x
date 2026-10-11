@@ -17,6 +17,7 @@
 #include <mach/mach.h>
 #include <mach-o/loader.h>
 #include <mach-o/dyld.h>
+#include <mach-o/dyld_images.h>
 #include <mach-o/nlist.h>
 #include "tcbretail_got.h"
 
@@ -99,6 +100,87 @@ static Method replaced_class_getClassMethod(Class cls, SEL sel)
 	return orig_class_getClassMethod(cls, sel);
 }
 
+// ─── task_info() hook via MSHookFunction (TASK_DYLD_INFO stealth) ───────────
+// SmartBanking (0x1031A3DCC and 0x1032527A4) queries task_info(mach_task_self(),
+// TASK_DYLD_INFO, &di, &cnt) to inspect dynamic loader data directly:
+//   1. 0x1031A3DCC: reads di.all_image_info_addr, verifies version >= 15, reads
+//      sharedCacheBaseAddress (offset 0xb0), checks magic "dyld_v1" and header
+//      mapping. If sharedCacheBaseAddress is NULL or magic mismatches, status=3.
+//   2. 0x1032527A4: reads di.all_image_info_addr->infoArray and infoArrayCount,
+//      loops over all loaded dylibs (0x103252914), and flags any injected or
+//      jailbreak library paths (/var/jb, roothide, systemhook, ellekit, etc.).
+//
+// MSHookFunction creates a real trampoline so replaced_task_info can call orig_task_info
+// for all tasks and flavors (TASK_BASIC_INFO, TASK_VM_INFO, etc.). For TASK_DYLD_INFO,
+// we sanitize di.all_image_info_addr by copying the entire struct (preserving
+// version, sharedCacheBaseAddress, sharedCacheSlide, dyldVersion, etc.) and replacing
+// only infoArray / infoArrayCount with an array stripped of jailbreak dylibs.
+
+#ifndef TASK_DYLD_INFO
+#define TASK_DYLD_INFO 17
+#endif
+
+static kern_return_t (*orig_task_info)(task_name_t target_task, task_flavor_t flavor, task_info_t task_info_out, mach_msg_type_number_t *task_info_outCnt) = NULL;
+
+#define MAX_FILTERED_IMAGES 4096
+static struct dyld_image_info      s_filtered_images[MAX_FILTERED_IMAGES];
+static struct dyld_all_image_infos s_filtered_image_infos;
+static pthread_mutex_t             s_task_dyld_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static bool is_jailbreak_image_path(const char *path) {
+    if (!path) return false;
+    if (strstr(path, "/var/jb") != NULL) return true;
+    if (strstr(path, "/basebin/") != NULL) return true;
+    if (strstr(path, "systemhook") != NULL) return true;
+    if (strstr(path, "roothide") != NULL) return true;
+    if (strstr(path, "RootHide") != NULL) return true;
+    if (strstr(path, "TweakInject") != NULL) return true;
+    if (strstr(path, "MobileSubstrate") != NULL) return true;
+    if (strstr(path, "CydiaSubstrate") != NULL) return true;
+    if (strstr(path, "libsubstrate") != NULL) return true;
+    if (strstr(path, "ellekit") != NULL) return true;
+    if (strstr(path, "ElleKit") != NULL) return true;
+    if (strstr(path, "jbroot") != NULL) return true;
+    if (strstr(path, "c2redirect") != NULL) return true;
+    return false;
+}
+
+static kern_return_t replaced_task_info(task_name_t target_task, task_flavor_t flavor, task_info_t task_info_out, mach_msg_type_number_t *task_info_outCnt) {
+    kern_return_t kr = orig_task_info ? orig_task_info(target_task, flavor, task_info_out, task_info_outCnt)
+                                      : task_info(target_task, flavor, task_info_out, task_info_outCnt);
+    if (kr == KERN_SUCCESS && flavor == TASK_DYLD_INFO && task_info_out) {
+        pthread_mutex_lock(&s_task_dyld_mutex);
+        struct task_dyld_info *di = (struct task_dyld_info *)task_info_out;
+        const struct dyld_all_image_infos *orig_infos = (const struct dyld_all_image_infos *)(uintptr_t)di->all_image_info_addr;
+        if (orig_infos && orig_infos->infoArray) {
+            uint32_t count = orig_infos->infoArrayCount;
+            const struct dyld_image_info *arr = orig_infos->infoArray;
+            uint32_t n = 0;
+            for (uint32_t i = 0; i < count && n < MAX_FILTERED_IMAGES; i++) {
+                if (!is_jailbreak_image_path(arr[i].imageFilePath)) {
+                    s_filtered_images[n++] = arr[i];
+                }
+            }
+            s_filtered_image_infos = *orig_infos;
+            s_filtered_image_infos.infoArray = s_filtered_images;
+            s_filtered_image_infos.infoArrayCount = n;
+            di->all_image_info_addr = (mach_vm_address_t)(uintptr_t)&s_filtered_image_infos;
+            RH_LOG("task_info(TASK_DYLD_INFO) spoofed: total %u -> visible %u (sharedCache=%p)",
+                   count, n, (void *)s_filtered_image_infos.sharedCacheBaseAddress);
+        }
+        pthread_mutex_unlock(&s_task_dyld_mutex);
+    }
+    return kr;
+}
+
+static void install_task_info_hook(void) {
+    static bool installed = false;
+    if (installed) return;
+    installed = true;
+    MSHookFunction((void *)task_info, (void *)replaced_task_info, (void **)&orig_task_info);
+    RH_LOG("task_info hooked (MSHookFunction trampoline)");
+}
+
 __attribute__((visibility("default"))) void canaryBypassInit(void)
 {
 #ifdef RHHIDE_DEBUG
@@ -118,6 +200,8 @@ __attribute__((visibility("default"))) void canaryBypassInit(void)
 	               (void **)&orig_class_getClassMethod);
 	RH_LOG("canaryBypassInit: class_getClassMethod hooked orig=%p",
 	       (void *)orig_class_getClassMethod);
+
+	install_task_info_hook();
 }
 
 // ─── method_getImplementation intercept (defensive) ──────────────────────────
@@ -1205,6 +1289,9 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
     RH_LOG("opendir hooked (MSHookFunction trampoline)");
     MSHookFunction((void *)readdir, (void *)replaced_readdir, (void **)&orig_readdir);
     RH_LOG("readdir hooked (MSHookFunction trampoline)");
+
+    // ── task_info hook: hide jailbreak dylibs from TASK_DYLD_INFO ───────────────
+    install_task_info_hook();
 
     // ── RuntimeHookChecker bypass: install method_getImplementation hook first ──
     // Only needed for MBV Bank: _TtC9MBRaspSdk18RuntimeHookChecker (in MBRaspSdk)
