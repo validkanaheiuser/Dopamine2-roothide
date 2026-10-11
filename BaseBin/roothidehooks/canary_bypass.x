@@ -127,21 +127,65 @@ static struct dyld_image_info      s_filtered_images[MAX_FILTERED_IMAGES];
 static struct dyld_all_image_infos s_filtered_image_infos;
 static pthread_mutex_t             s_task_dyld_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+static inline bool ci_contains(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return false;
+    for (; *haystack; haystack++) {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h && *n) {
+            unsigned char ch = (unsigned char)*h;
+            unsigned char cn = (unsigned char)*n;
+            if (ch >= 'A' && ch <= 'Z') ch += 32;
+            if (cn >= 'A' && cn <= 'Z') cn += 32;
+            if (ch != cn) break;
+            h++;
+            n++;
+        }
+        if (!*n) return true;
+    }
+    return false;
+}
+
 static bool is_jailbreak_image_path(const char *path) {
     if (!path) return false;
-    if (strstr(path, "/var/jb") != NULL) return true;
-    if (strstr(path, "/basebin/") != NULL) return true;
-    if (strstr(path, "systemhook") != NULL) return true;
-    if (strstr(path, "roothide") != NULL) return true;
-    if (strstr(path, "RootHide") != NULL) return true;
-    if (strstr(path, "TweakInject") != NULL) return true;
-    if (strstr(path, "MobileSubstrate") != NULL) return true;
-    if (strstr(path, "CydiaSubstrate") != NULL) return true;
-    if (strstr(path, "libsubstrate") != NULL) return true;
-    if (strstr(path, "ellekit") != NULL) return true;
-    if (strstr(path, "ElleKit") != NULL) return true;
-    if (strstr(path, "jbroot") != NULL) return true;
-    if (strstr(path, "c2redirect") != NULL) return true;
+    static const char * const needles[] = {
+        "/var/jb",
+        "/basebin/",
+        "systemhook",
+        "roothide",
+        "tweakloader",
+        "tweakinject",
+        "mobilesubstrate",
+        "cydiasubstrate",
+        "libsubstrate",
+        "ellekit",
+        "jbroot",
+        "c2redirect",
+        "libinjector",
+        "frida",
+        "cycript",
+        "rocketbootstrap",
+        "weeloader",
+        "libhooker",
+        "abypass",
+        "flyjb",
+        "substitute",
+        "cephei",
+        "electra",
+        "shadow",
+        "dopamine",
+        "sileo",
+        "cydia",
+        "zebra",
+        "trollstore",
+        "installer5",
+        "safemode",
+        "libjailbreak",
+        NULL
+    };
+    for (const char * const *p = needles; *p; p++) {
+        if (ci_contains(path, *p)) return true;
+    }
     return false;
 }
 
@@ -154,19 +198,34 @@ static kern_return_t replaced_task_info(task_name_t target_task, task_flavor_t f
         const struct dyld_all_image_infos *orig_infos = (const struct dyld_all_image_infos *)(uintptr_t)di->all_image_info_addr;
         if (orig_infos && orig_infos->infoArray) {
             uint32_t count = orig_infos->infoArrayCount;
-            const struct dyld_image_info *arr = orig_infos->infoArray;
-            uint32_t n = 0;
-            for (uint32_t i = 0; i < count && n < MAX_FILTERED_IMAGES; i++) {
-                if (!is_jailbreak_image_path(arr[i].imageFilePath)) {
-                    s_filtered_images[n++] = arr[i];
+            static uint32_t s_last_raw_count = 0;
+            static const void *s_last_info_array = NULL;
+            static uint32_t s_last_filtered_count = 0;
+
+            if (count != s_last_raw_count || orig_infos->infoArray != s_last_info_array) {
+                const struct dyld_image_info *arr = orig_infos->infoArray;
+                uint32_t n = 0;
+                for (uint32_t i = 0; i < count && n < MAX_FILTERED_IMAGES; i++) {
+                    if (!is_jailbreak_image_path(arr[i].imageFilePath)) {
+                        s_filtered_images[n++] = arr[i];
+                    }
                 }
+                s_last_raw_count = count;
+                s_last_info_array = arr;
+                s_last_filtered_count = n;
+
+                s_filtered_image_infos = *orig_infos;
+                s_filtered_image_infos.infoArray = s_filtered_images;
+                s_filtered_image_infos.infoArrayCount = n;
+
+                RH_LOG("task_info(TASK_DYLD_INFO) spoofed: total %u -> visible %u (sharedCache=%p)",
+                       count, n, (void *)s_filtered_image_infos.sharedCacheBaseAddress);
+            } else {
+                s_filtered_image_infos = *orig_infos;
+                s_filtered_image_infos.infoArray = s_filtered_images;
+                s_filtered_image_infos.infoArrayCount = s_last_filtered_count;
             }
-            s_filtered_image_infos = *orig_infos;
-            s_filtered_image_infos.infoArray = s_filtered_images;
-            s_filtered_image_infos.infoArrayCount = n;
             di->all_image_info_addr = (mach_vm_address_t)(uintptr_t)&s_filtered_image_infos;
-            RH_LOG("task_info(TASK_DYLD_INFO) spoofed: total %u -> visible %u (sharedCache=%p)",
-                   count, n, (void *)s_filtered_image_infos.sharedCacheBaseAddress);
         }
         pthread_mutex_unlock(&s_task_dyld_mutex);
     }

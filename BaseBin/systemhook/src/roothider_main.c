@@ -990,18 +990,65 @@ static const struct dyld_all_image_infos *get_image_infos(void) {
     return (const struct dyld_all_image_infos *)(uintptr_t)di.all_image_info_addr;
 }
 
+static inline bool ci_contains(const char *haystack, const char *needle) {
+    if (!haystack || !needle) return false;
+    for (; *haystack; haystack++) {
+        const char *h = haystack;
+        const char *n = needle;
+        while (*h && *n) {
+            unsigned char ch = (unsigned char)*h;
+            unsigned char cn = (unsigned char)*n;
+            if (ch >= 'A' && ch <= 'Z') ch += 32;
+            if (cn >= 'A' && cn <= 'Z') cn += 32;
+            if (ch != cn) break;
+            h++;
+            n++;
+        }
+        if (!*n) return true;
+    }
+    return false;
+}
+
 static bool is_jailbreak_image(const char *path) {
     if (!path) return false;
-    if (strstr(path, "/var/jb") != NULL) return true;
-    if (strstr(path, "/basebin/") != NULL) return true;
-    if (strstr(path, "systemhook") != NULL) return true;
-    if (strstr(path, "roothide") != NULL) return true;
-    if (strstr(path, "/usr/lib/TweakInject") != NULL) return true;
-    if (strstr(path, "/Library/MobileSubstrate") != NULL) return true;
-    if (strstr(path, "CydiaSubstrate") != NULL) return true;
-    if (strstr(path, "libsubstrate") != NULL) return true;
-    if (strstr(path, "ellekit") != NULL) return true;
-    if (strstr(path, "/.jbroot-") != NULL) return true;
+    static const char * const needles[] = {
+        "/var/jb",
+        "/basebin/",
+        "systemhook",
+        "roothide",
+        "tweakloader",
+        "tweakinject",
+        "mobilesubstrate",
+        "cydiasubstrate",
+        "libsubstrate",
+        "ellekit",
+        "jbroot",
+        "c2redirect",
+        "libinjector",
+        "frida",
+        "cycript",
+        "rocketbootstrap",
+        "weeloader",
+        "libhooker",
+        "abypass",
+        "flyjb",
+        "substitute",
+        "cephei",
+        "electra",
+        "shadow",
+        "dopamine",
+        "sileo",
+        "cydia",
+        "zebra",
+        "trollstore",
+        "installer5",
+        "safemode",
+        "libjailbreak",
+        NULL
+    };
+    for (const char * const *p = needles; *p; p++) {
+        if (ci_contains(path, *p)) return true;
+    }
     return false;
 }
 
