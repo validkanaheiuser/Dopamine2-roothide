@@ -447,6 +447,7 @@ static char gExecutablePath[PATH_MAX] = {0};
 // get_image_infos() returns the filtered struct (no JB images). raw_dladdr
 // and Pillar 3 callbacks need the unfiltered view to detect JB callers.
 static const struct dyld_all_image_infos *s_raw_dyld_infos = NULL;
+static int raw_dladdr(const void *addr, Dl_info *info);
 
 // ─── Fix A: access() hook for IOSSecuritySuite file-existence checks ─────────
 //
