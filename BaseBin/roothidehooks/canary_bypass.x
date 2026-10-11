@@ -181,6 +181,19 @@ static void install_task_info_hook(void) {
     RH_LOG("task_info hooked (MSHookFunction trampoline)");
 }
 
+// ─── BIDV C-2 State 9 hook: prevent code 3 injection ───────────────────────────
+// sub_1031FFEAC State 9 (0x103200324) calls sub_10325B0C4(&v43, 3) to inject
+// violation code 3. Code 3 → sub_10320704C(3)=2 → "C-2" alert.
+// Block code 3 by guarding the call site: if arg==3, return early (no-op).
+// Note: Uses hook_function_abs (inline trampoline), so no orig capture.
+static void replaced_sub_10325B0C4(void *a1, int a2) {
+    if (a2 == 3) {
+        // Block code 3 (C-2 trigger). Other codes (if any) skip this hook.
+        return;
+    }
+    // For non-code-3 cases, just return (no-op). State 9 branch is exit anyway.
+}
+
 __attribute__((visibility("default"))) void canaryBypassInit(void)
 {
 #ifdef RHHIDE_DEBUG
@@ -2231,6 +2244,23 @@ __attribute__((visibility("default"))) void logScanBypassInit(void)
                 RH_LOG("SmartBanking: [SUCCESS] SOTP isDidChangeColor, isDidChangeColor4, getDtR, checklibIsJB, cB, findOut hooked -> SAFE");
             }
 
+            // ── Hook sub_10325B0C4 (State 9 code injection) to prevent code 3 ────────
+            // BIDV sub_1031FFEAC State 8: set intersection between system data (var_70)
+            // and blacklist (qword_1067760B8). If match found → State 9 → call
+            // sub_10325B0C4(&v43, 3) to inject code 3 → sub_10320704C(3)=2 → "C-2".
+            // Hook: block code 3 injection using hook_function_abs (ASLR-aware).
+            if (is_smartbanking) {
+                const struct mach_header *mh_main = _dyld_get_image_header(0);
+                if (mh_main) {
+                    uintptr_t main_slide = (uintptr_t)mh_main - 0x100000000ULL;
+                    void *fn_code3_guard = (void *)(0x10325B0C4ULL + main_slide);
+                    if (hook_function_abs(fn_code3_guard, (void *)replaced_sub_10325B0C4)) {
+                        RH_LOG("SmartBanking: sub_10325B0C4 (State 9 code 3 guard) hooked");
+                    } else {
+                        RH_LOG("SmartBanking: sub_10325B0C4 hook FAILED (mprotect err?)");
+                    }
+                }
+            }
 
             Class vnbBioCls = objc_getClass("VNBBiometricManager");
             if (vnbBioCls) {
