@@ -460,6 +460,12 @@ static const char *const kBlockedAccessPaths[] = {
     "/usr/lib/roothideinit.dylib",
     "/usr/lib/libjailbreak.dylib",
     "/usr/lib/roothidepatch.dylib",
+    // JB-specific symlinks that do NOT exist on stock iOS 15+.
+    // sub_102028C0C (deferred 9s C-2 check) calls access() for these and counts
+    // how many exist. /usr/include only exists on JB (symlink → /.jbroot-UUID/usr/include)
+    // — its presence alone pushes the score to the C-2 threshold.
+    "/usr/include",
+    "/usr/arm-apple-darwin9",
     NULL
 };
 
